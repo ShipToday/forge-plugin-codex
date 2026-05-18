@@ -1,0 +1,37 @@
+{
+  "name": "forge-workflow",
+  "version": "1.1.0",
+  "description": "Conversational management skill for organization admins to AUTHOR new Forge workflows AND DELETE existing org- or team-scoped overrides. Fetches the skills catalog via forge__list_skills_catalog, drafts proposals or identifies delete targets grounded in existing state, iterates with the admin, and commits the change via forge__save_workflow or forge__delete_workflow after explicit approval.",
+  "author": {
+    "name": "ShipToday"
+  },
+  "homepage": "https://shiptoday.ai",
+  "triggers": [
+    "create a workflow",
+    "create workflow",
+    "customize my SDLC",
+    "customize my PDLC",
+    "build a new workflow",
+    "build a workflow",
+    "set up a custom process",
+    "author a workflow",
+    "add a team workflow",
+    "make a new workflow",
+    "new custom workflow",
+    "delete a workflow",
+    "delete workflow",
+    "delete the workflow override",
+    "delete the org workflow override",
+    "delete the team workflow override",
+    "remove a workflow override",
+    "remove the workflow override",
+    "remove my workflow override",
+    "reset workflow to default",
+    "reset this workflow to default",
+    "reset the workflow override",
+    "clear the team workflow override",
+    "clear the org workflow override",
+    "drop the workflow override",
+    "undo my workflow override"
+  ]
+}
