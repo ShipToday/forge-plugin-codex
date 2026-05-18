@@ -1,0 +1,15 @@
+name: Auto Approve Assigned PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, review_requested]
+
+jobs:
+  auto-approve:
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.requested_reviewers.*.login, 'ST-administrator')
+    steps:
+      - name: Auto approve
+        uses: hmarr/auto-approve-action@v4
+        with:
+          github-token: ${{ secrets.AUTO_APPROVE_PAT }}
