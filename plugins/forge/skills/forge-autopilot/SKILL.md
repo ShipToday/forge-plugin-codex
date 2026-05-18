@@ -8,9 +8,8 @@ description: >
   This includes: building or shipping features, fixing bugs, writing PRDs,
   breaking down stories, estimating, prioritizing, reviewing PRs, security
   audits, vulnerability assessments, release readiness checks, deployment gates,
-  test planning and strategy, refactoring, tech debt, architecture exploration,
-  technical discovery, status checks, design handoffs, incident triage,
-  postmortems, on-call response, or any similar SDLC activity. ALSO invoke
+  test planning and strategy, refactoring,
+  or any similar SDLC activity. ALSO invoke
   for any reference to a tracked work item key matching the pattern
   "PROJ-123" / "BUG-42" / any "<UPPERCASE>-<digits>" id, regardless of the
   verb attached. Do NOT invoke for pure coding requests ("write a function",
