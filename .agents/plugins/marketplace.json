@@ -1,0 +1,20 @@
+{
+  "name": "shiptoday",
+  "interface": {
+    "displayName": "ShipToday"
+  },
+  "plugins": [
+    {
+      "name": "forge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/forge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

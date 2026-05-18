@@ -40,12 +40,37 @@ const WORKFLOW_ABANDON_PATTERN = 'forge__abandon_workflow';
 // -- Helpers ------------------------------------------------------------------
 
 /**
+ * Coerce a PostToolUse `tool_response` into plain text.
+ *
+ * MCP tool responses arrive as a structured object (commonly
+ * `{ content: [{ type: "text", text: "..." }] }`), not a string.
+ * JSON.stringify-ing such an object escapes every real newline into a
+ * literal `\n` sequence, which breaks line-anchored regexes like the
+ * `[^\n]+` capture in extractToolPermissions. Pull the real text out
+ * instead so newlines stay intact.
+ */
+function responseText(response) {
+  if (!response) return '';
+  if (typeof response === 'string') return response;
+  const content = Array.isArray(response) ? response : response.content;
+  if (Array.isArray(content)) {
+    return content
+      .map((c) => (typeof c === 'string' ? c : (c && typeof c.text === 'string' ? c.text : '')))
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (typeof response.text === 'string') return response.text;
+  if (typeof response.output === 'string') return response.output;
+  return JSON.stringify(response);
+}
+
+/**
  * Check if a tool_response looks like a valid Forge workflow response.
  * Forge responses contain a "Conversation ID" line on success.
  */
 function isValidWorkflowResponse(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   return text.includes('Conversation ID');
 }
 
@@ -56,7 +81,7 @@ function isValidWorkflowResponse(response) {
  */
 function isWorkflowComplete(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
 
   // Pattern: "(N/N)" where both numbers are equal — all steps done
   const stepMatch = text.match(/\((\d+)\/(\d+)\)/);
@@ -75,7 +100,7 @@ function isWorkflowComplete(response) {
  */
 function isWorkflowAbandoned(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   return /\*\*Workflow abandoned\*\*/.test(text);
 }
 
@@ -98,7 +123,7 @@ function isWorkflowAbandoned(response) {
  */
 function extractPendingCheckpointStep(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const match = text.match(/\*\*CHECKPOINT\*\*\s+—\s+"([^"]+)"\s+(?:awaiting user input|paused at confirmation gate)/);
   return match ? match[1] : null;
 }
@@ -111,7 +136,7 @@ function extractPendingCheckpointStep(response) {
  */
 function isRelayedQuestionReentry(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   return /\*\*RE-ENTRY\*\*\s+—\s+"[^"]+"\s+resumed with user answer/.test(text);
 }
 
@@ -126,7 +151,7 @@ function isRelayedQuestionReentry(response) {
  */
 function extractToolPermissions(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const match = text.match(/\*\*Tool Permissions\*\*:\s*([^\n]+)/);
   if (!match) return null;
   return match[1].split(',').map((s) => s.trim()).filter(Boolean);
@@ -139,7 +164,7 @@ function extractToolPermissions(response) {
  */
 function extractCurrentStepSkill(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const next = text.match(/\*\*NEXT STEP\*\*:\s*"([^"]+)"/);
   if (next) return next[1];
   const reentry = text.match(/\*\*RE-ENTRY\*\*\s+—\s+"([^"]+)"/);
@@ -178,7 +203,7 @@ function extractObserverStatus(event) {
  */
 function extractConversationId(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const match = text.match(/\*?\*?Conversation ID\*?\*?:\s*`?([a-f0-9-]+)`?/i);
   return match ? match[1] : null;
 }

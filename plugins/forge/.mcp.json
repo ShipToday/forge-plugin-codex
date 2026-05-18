@@ -1,5 +1,5 @@
 {
-  "mcpServers": {
+  "mcp_servers": {
     "forge": {
       "type": "http",
       "url": "https://teams.shiptoday.ai/mcp"
