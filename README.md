@@ -20,25 +20,47 @@ check status of my feature
 
 ## What's included
 
-- **Forge MCP server** (`.mcp.json`) connects to
+- **Forge MCP server** (`plugins/forge/.mcp.json`) connects to
   `https://teams.shiptoday.ai/mcp`.
 - **`forge-autopilot` skill** detects product-development intent and routes the
   request to the right Forge workflow.
 - **`forge-workflow` skill** helps organization admins create or remove custom
   Forge workflow overrides.
-- **Hooks** (`hooks/hooks.json`) coordinate session routing, workflow state,
-  step guardrails, and workflow tracking.
+- **Hooks** (`plugins/forge/hooks/hooks.json`) coordinate session routing,
+  workflow state, step guardrails, and workflow tracking.
 
-## Local development
+## Install
 
-Point Codex at this plugin root:
+This repository is a self-contained Codex plugin marketplace. The marketplace
+manifest lives at `.agents/plugins/marketplace.json` and the plugin itself at
+`plugins/forge/`.
 
-```text
-plugins/forge
+### From the Codex app
+
+1. Open **Plugins → ⋯ → Add marketplace**.
+2. **Source**: `ShipToday/forge-plugin-codex`
+3. **Git ref**: `main`
+4. **Sparse paths**: leave blank.
+5. Click **Add marketplace**, then install **Forge** from the `shiptoday`
+   marketplace.
+
+### From the Codex CLI
+
+```bash
+codex plugin marketplace add ShipToday/forge-plugin-codex
 ```
 
-If you want the plugin to appear in a local Codex marketplace, add a marketplace
-entry that points to `./plugins/forge`.
+Then run `/plugins`, open the `shiptoday` marketplace, and install **Forge**.
+
+### Enable hooks
+
+The plugin ships lifecycle hooks (session routing, workflow guardrails).
+Plugin hooks are disabled by default — enable them in `~/.codex/config.toml`:
+
+```toml
+[features]
+plugin_hooks = true
+```
 
 ## License
 

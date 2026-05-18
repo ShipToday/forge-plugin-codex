@@ -57,6 +57,12 @@ function freshState() {
     last_observer_turn: null,
     last_checkpoint_at: null,
     conversation_id: null,   // Forge conversation ID for active workflow
+    // Forge conversation ID of the observe_session run, kept after that
+    // workflow completes (conversation_id above is nulled on completion).
+    // The periodic Stop-hook checkpoint targets this so it works even
+    // from a later process that never ran observe_session itself.
+    // Only cleared by the 4h session-state TTL reset.
+    last_observer_conversation_id: null,
     current_skill: null,     // Active skill_id or workflow type
     skill_invocations: [],   // Local skills invoked this session [{ name, at }]
     skills_flushed_at_turn: 0, // Turn count at last skill invocation flush

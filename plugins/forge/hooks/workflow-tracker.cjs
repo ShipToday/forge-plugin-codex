@@ -40,12 +40,33 @@ const WORKFLOW_ABANDON_PATTERN = 'forge__abandon_workflow';
 // -- Helpers ------------------------------------------------------------------
 
 /**
+ * Extract the human-readable text from a PostToolUse `tool_response`.
+ *
+ * MCP tool responses arrive as a structured object — `{ content: [{ type:
+ * "text", text: "…" }] }` — not a string. `JSON.stringify`-ing that object
+ * escapes every real newline into a literal `\n` sequence, which breaks any
+ * regex that relies on `[^\n]` line boundaries or matches quoted/comma'd
+ * content. This helper pulls the actual text payload so the extractors below
+ * operate on the response as the orchestrator rendered it.
+ */
+function responseText(response) {
+  if (!response) return '';
+  if (typeof response === 'string') return response;
+  if (Array.isArray(response.content)) {
+    return response.content
+      .map((c) => (c && typeof c.text === 'string') ? c.text : '')
+      .join('\n');
+  }
+  return JSON.stringify(response);
+}
+
+/**
  * Check if a tool_response looks like a valid Forge workflow response.
  * Forge responses contain a "Conversation ID" line on success.
  */
 function isValidWorkflowResponse(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   return text.includes('Conversation ID');
 }
 
@@ -56,7 +77,7 @@ function isValidWorkflowResponse(response) {
  */
 function isWorkflowComplete(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
 
   // Pattern: "(N/N)" where both numbers are equal — all steps done
   const stepMatch = text.match(/\((\d+)\/(\d+)\)/);
@@ -75,7 +96,7 @@ function isWorkflowComplete(response) {
  */
 function isWorkflowAbandoned(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   return /\*\*Workflow abandoned\*\*/.test(text);
 }
 
@@ -98,7 +119,7 @@ function isWorkflowAbandoned(response) {
  */
 function extractPendingCheckpointStep(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const match = text.match(/\*\*CHECKPOINT\*\*\s+—\s+"([^"]+)"\s+(?:awaiting user input|paused at confirmation gate)/);
   return match ? match[1] : null;
 }
@@ -111,7 +132,7 @@ function extractPendingCheckpointStep(response) {
  */
 function isRelayedQuestionReentry(response) {
   if (!response) return false;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   return /\*\*RE-ENTRY\*\*\s+—\s+"[^"]+"\s+resumed with user answer/.test(text);
 }
 
@@ -126,7 +147,7 @@ function isRelayedQuestionReentry(response) {
  */
 function extractToolPermissions(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const match = text.match(/\*\*Tool Permissions\*\*:\s*([^\n]+)/);
   if (!match) return null;
   return match[1].split(',').map((s) => s.trim()).filter(Boolean);
@@ -139,7 +160,7 @@ function extractToolPermissions(response) {
  */
 function extractCurrentStepSkill(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const next = text.match(/\*\*NEXT STEP\*\*:\s*"([^"]+)"/);
   if (next) return next[1];
   const reentry = text.match(/\*\*RE-ENTRY\*\*\s+—\s+"([^"]+)"/);
@@ -178,7 +199,7 @@ function extractObserverStatus(event) {
  */
 function extractConversationId(response) {
   if (!response) return null;
-  const text = typeof response === 'string' ? response : JSON.stringify(response);
+  const text = responseText(response);
   const match = text.match(/\*?\*?Conversation ID\*?\*?:\s*`?([a-f0-9-]+)`?/i);
   return match ? match[1] : null;
 }
@@ -264,7 +285,7 @@ async function main() {
     const currentSkill = extractSkillContext(event);
     const toolPermissions = extractToolPermissions(toolResponse);
     const currentStepSkill = extractCurrentStepSkill(toolResponse);
-    sessionState.write({
+    const updates = {
       active_workflow: true,
       conversation_id: conversationId,
       current_skill: currentSkill,
@@ -272,7 +293,16 @@ async function main() {
       // not publish a Tool Permissions line — workflow-guard fails open.
       current_step_tools: toolPermissions,
       current_step_skill: currentStepSkill,
-    });
+    };
+    // Pin the observe_session conversation id separately so the periodic
+    // Stop-hook checkpoint can target it after the workflow completes —
+    // conversation_id above is nulled on completion. Captured here (not
+    // on completion) so it always reflects the observer run and is never
+    // overwritten by a chained follow-up workflow.
+    if (currentSkill === 'observe_session') {
+      updates.last_observer_conversation_id = conversationId;
+    }
+    sessionState.write(updates);
     return;
   }
 

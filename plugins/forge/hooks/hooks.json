@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"./hooks/prompt-router.cjs\""
+            "command": "node \"${PLUGIN_ROOT}/hooks/prompt-router.cjs\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"./hooks/stop-observer.cjs\""
+            "command": "node \"${PLUGIN_ROOT}/hooks/stop-observer.cjs\""
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"./hooks/workflow-guard.cjs\""
+            "command": "node \"${PLUGIN_ROOT}/hooks/workflow-guard.cjs\""
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"./hooks/workflow-tracker.cjs\""
+            "command": "node \"${PLUGIN_ROOT}/hooks/workflow-tracker.cjs\""
           }
         ]
       }
