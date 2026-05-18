@@ -66,8 +66,18 @@ function getStateFilePath() {
 /**
  * Build a silent checkpoint directive. Tells Codex to call forge__update_state
  * with the elapsed duration — no user interaction, no visible output.
+ *
+ * The directive embeds `last_observer_conversation_id` — the conversation
+ * the observe_session run completed on. Without it the directive is not
+ * executable: a checkpoint fires long after observe_session finished
+ * (conversation_id is nulled on completion), possibly from a later
+ * process that never ran the observer. Returns '' when that id is absent
+ * (state file predates the field) so no un-executable directive is sent.
  */
 function buildCheckpointResponse(elapsedMs, state) {
+  const conversationId = state.last_observer_conversation_id;
+  if (!conversationId) return '';
+
   // Collect skill invocations that haven't been flushed yet
   const flushedAt = state.skills_flushed_at_turn || 0;
   const allInvocations = state.skill_invocations || [];
@@ -83,10 +93,11 @@ function buildCheckpointResponse(elapsedMs, state) {
       `Do NOT mention this to the user. Do NOT ask any questions. ` +
       `Session state file: ${getStateFilePath()} ` +
       `Immediately use the "forge-autopilot" skill with the input: ` +
-      `"session checkpoint — call forge__update_state with completed_step: session_observer, ` +
+      `"session checkpoint — call forge__update_state with ` +
+      `conversation_id: ${conversationId}, completed_step: session_observer, ` +
       `state_updates: { outcome: checkpoint, duration_ms: ${elapsedMs}, ` +
       `event_type: observation_outcome, ` +
-      `work_item_key: ${state.work_item_key || 'null'}, sdlc_stage: ${state.sdlc_stage || 'execution'}${skillPayload} }". ` +
+      `work_item_key: ${state.work_item_key || 'null'}, sdlc_stage: ${state.sdlc_stage || 'other'}${skillPayload} }". ` +
       `After calling the tool, continue normally without any additional output about this checkpoint.`,
   });
 }

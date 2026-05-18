@@ -148,6 +148,22 @@ original ask leaves their selection unhonored and the audit trail
 blind to which workflow should now be active. Always read `follow_up`
 before resuming.
 
+### Exception 3 — Session checkpoint (passive time tracking)
+
+Triggered by the `stop-observer.cjs` Stop hook for an already-tracked
+(`logged` / `linked`) session — input contains "session checkpoint" and
+spells out a complete `forge__update_state` call (`conversation_id`,
+`completed_step`, `state_updates`).
+
+→ Call `forge__update_state` exactly as the directive specifies — pass
+the `conversation_id` and `state_updates` verbatim. The `conversation_id`
+is the original `observe_session` conversation; the server records the
+elapsed time as a silent audit event.
+
+Do NOT start a workflow, do NOT classify this as a build/bug/architecture
+request, and do NOT surface anything to the user — it is a passive,
+silent check. After the call, continue normally.
+
 ## Step 3: Follow the workflow
 
 Pass the user's request as `feature_request` (strip pleasantries, keep substance).

@@ -40,27 +40,23 @@ const WORKFLOW_ABANDON_PATTERN = 'forge__abandon_workflow';
 // -- Helpers ------------------------------------------------------------------
 
 /**
- * Coerce a PostToolUse `tool_response` into plain text.
+ * Extract the human-readable text from a PostToolUse `tool_response`.
  *
- * MCP tool responses arrive as a structured object (commonly
- * `{ content: [{ type: "text", text: "..." }] }`), not a string.
- * JSON.stringify-ing such an object escapes every real newline into a
- * literal `\n` sequence, which breaks line-anchored regexes like the
- * `[^\n]+` capture in extractToolPermissions. Pull the real text out
- * instead so newlines stay intact.
+ * MCP tool responses arrive as a structured object — `{ content: [{ type:
+ * "text", text: "…" }] }` — not a string. `JSON.stringify`-ing that object
+ * escapes every real newline into a literal `\n` sequence, which breaks any
+ * regex that relies on `[^\n]` line boundaries or matches quoted/comma'd
+ * content. This helper pulls the actual text payload so the extractors below
+ * operate on the response as the orchestrator rendered it.
  */
 function responseText(response) {
   if (!response) return '';
   if (typeof response === 'string') return response;
-  const content = Array.isArray(response) ? response : response.content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => (typeof c === 'string' ? c : (c && typeof c.text === 'string' ? c.text : '')))
-      .filter(Boolean)
+  if (Array.isArray(response.content)) {
+    return response.content
+      .map((c) => (c && typeof c.text === 'string') ? c.text : '')
       .join('\n');
   }
-  if (typeof response.text === 'string') return response.text;
-  if (typeof response.output === 'string') return response.output;
   return JSON.stringify(response);
 }
 
@@ -289,7 +285,7 @@ async function main() {
     const currentSkill = extractSkillContext(event);
     const toolPermissions = extractToolPermissions(toolResponse);
     const currentStepSkill = extractCurrentStepSkill(toolResponse);
-    sessionState.write({
+    const updates = {
       active_workflow: true,
       conversation_id: conversationId,
       current_skill: currentSkill,
@@ -297,7 +293,16 @@ async function main() {
       // not publish a Tool Permissions line — workflow-guard fails open.
       current_step_tools: toolPermissions,
       current_step_skill: currentStepSkill,
-    });
+    };
+    // Pin the observe_session conversation id separately so the periodic
+    // Stop-hook checkpoint can target it after the workflow completes —
+    // conversation_id above is nulled on completion. Captured here (not
+    // on completion) so it always reflects the observer run and is never
+    // overwritten by a chained follow-up workflow.
+    if (currentSkill === 'observe_session') {
+      updates.last_observer_conversation_id = conversationId;
+    }
+    sessionState.write(updates);
     return;
   }
 
