@@ -40,7 +40,7 @@
 
 'use strict';
 
-const sessionState = require('./session-state.cjs');
+const sessionStateModule = require('./session-state.cjs');
 
 // -- Detection patterns ------------------------------------------------------
 
@@ -111,14 +111,16 @@ async function main() {
   for await (const chunk of process.stdin) {
     input += chunk;
   }
+  let event = {};
   try {
-    const event = JSON.parse(input);
+    event = JSON.parse(input);
     prompt = event.prompt || event.message || event.content || '';
   } catch {
     prompt = input.trim();
   }
 
-  // Read session state
+  // Read session state, scoped to this session.
+  const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
 
   // Re-arm the session observer on each new turn when it's safe to do so.

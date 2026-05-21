@@ -3,12 +3,24 @@
 /**
  * session-state.js — Shared session state module for Forge plugin hooks.
  *
- * Manages a local JSON state file per working directory, used by both
- * detect-forge.js (active mode) and session-observer.js (passive mode)
- * to coordinate and avoid conflicts.
+ * Manages a local JSON state file used by all four plugin hooks
+ * (prompt-router, workflow-tracker, stop-observer, workflow-guard) to
+ * coordinate active-workflow tracking and passive observation.
  *
- * State files live in {os.tmpdir()}/forge-observer/{hash(cwd)}.json
- * and auto-expire after 4 hours (matching Forge's server-side TTL).
+ * State is scoped per Claude Code session. Each hook event carries a
+ * `session_id`; the state file is keyed by hash(cwd + session_id) so two
+ * concurrent Claude Code sessions in the same working directory each get
+ * an independent workflow slot. When no session id is available (older
+ * Claude Code, or the Codex/Cursor builds of this plugin), the key falls
+ * back to hash(cwd) — preserving the original single-workflow-per-
+ * directory behavior.
+ *
+ * Usage: `require('./session-state.cjs').forSession(event.session_id)`
+ * returns a `{ read, write, increment, stateFilePath }` instance bound to
+ * that session's file.
+ *
+ * State files live in {os.tmpdir()}/forge-observer/{key}.json and
+ * auto-expire after 4 hours (matching Forge's server-side TTL).
  *
  * This module is deterministic — no AI, no network calls.
  */
@@ -28,13 +40,19 @@ const CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours — auto-clean stale fil
 
 // -- Helpers -----------------------------------------------------------------
 
-function hashCwd() {
-  const cwd = process.cwd();
-  return crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 16);
+/**
+ * Compute the state file key. Scoped to the Claude Code session when a
+ * session id is available so concurrent sessions in the same working
+ * directory get independent state. Falls back to a cwd-only key when no
+ * session id is present.
+ */
+function stateKey(sessionId) {
+  const material = sessionId ? `${process.cwd()}:${sessionId}` : process.cwd();
+  return crypto.createHash('sha256').update(material).digest('hex').slice(0, 16);
 }
 
-function statePath() {
-  return path.join(STATE_DIR, `${hashCwd()}.json`);
+function statePath(sessionId) {
+  return path.join(STATE_DIR, `${stateKey(sessionId)}.json`);
 }
 
 function ensureDir() {
@@ -43,9 +61,9 @@ function ensureDir() {
   }
 }
 
-function freshState() {
+function freshState(sessionId) {
   return {
-    session_id: crypto.randomUUID(),
+    session_id: sessionId || crypto.randomUUID(),
     session_start: new Date().toISOString(),
     turn_count: 0,
     nudge_shown: false,
@@ -70,8 +88,8 @@ function freshState() {
     // **CHECKPOINT** response (skill is awaiting user input via
     // user-question relay). Cleared on **RE-ENTRY** (answer flowed back),
     // normal step advance, workflow completion, or abandonment.
-    // The future workflow-guard PreToolUse hook reads this to deny
-    // tool calls other than user-question relay / forge__update_state /
+    // The workflow-guard PreToolUse hook reads this to deny tool calls
+    // other than user-question relay / forge__update_state /
     // forge__abandon_workflow until the user has answered.
     pending_checkpoint: false,
     pending_checkpoint_step: null,    // Skill id pinned for input
@@ -85,74 +103,6 @@ function freshState() {
     current_step_tools: null,
     current_step_skill: null,
   };
-}
-
-// -- Public API --------------------------------------------------------------
-
-/**
- * Read the current session state.
- * Returns a fresh state if the file doesn't exist or is stale (> TTL_MS old).
- * Also triggers cleanup of stale files older than CLEANUP_AGE_MS.
- */
-function read() {
-  ensureDir();
-  cleanupStale();
-
-  const fp = statePath();
-  if (!fs.existsSync(fp)) {
-    const state = freshState();
-    writeRaw(state);
-    return state;
-  }
-
-  try {
-    const raw = fs.readFileSync(fp, 'utf8');
-    const state = JSON.parse(raw);
-
-    // Check staleness — if older than TTL, start a new session
-    const age = Date.now() - new Date(state.session_start).getTime();
-    if (age > TTL_MS) {
-      const fresh = freshState();
-      writeRaw(fresh);
-      return fresh;
-    }
-
-    return state;
-  } catch {
-    // Corrupted file — start fresh
-    const state = freshState();
-    writeRaw(state);
-    return state;
-  }
-}
-
-/**
- * Merge updates into the current session state and persist.
- * @param {Object} updates — fields to merge (shallow)
- */
-function write(updates) {
-  const state = read();
-  Object.assign(state, updates);
-  writeRaw(state);
-  return state;
-}
-
-/**
- * Increment a numeric field by 1 and persist.
- * @param {string} field — the field name to increment
- */
-function increment(field) {
-  const state = read();
-  state[field] = (state[field] || 0) + 1;
-  writeRaw(state);
-  return state;
-}
-
-// -- Internal ----------------------------------------------------------------
-
-function writeRaw(state) {
-  ensureDir();
-  fs.writeFileSync(statePath(), JSON.stringify(state, null, 2), 'utf8');
 }
 
 /**
@@ -176,4 +126,82 @@ function cleanupStale() {
   }
 }
 
-module.exports = { read, write, increment };
+// -- Public API --------------------------------------------------------------
+
+/**
+ * Build a session-scoped state accessor. Pass the `session_id` from the
+ * hook event; a falsy value yields the cwd-only fallback file.
+ *
+ * @param {string|undefined} sessionId — Claude Code session id
+ * @returns {{ read: Function, write: Function, increment: Function, stateFilePath: string }}
+ */
+function forSession(sessionId) {
+  const fp = statePath(sessionId);
+
+  function writeRaw(state) {
+    ensureDir();
+    fs.writeFileSync(fp, JSON.stringify(state, null, 2), 'utf8');
+  }
+
+  /**
+   * Read this session's state.
+   * Returns a fresh state if the file doesn't exist or is stale (> TTL_MS old).
+   * Also triggers cleanup of stale files older than CLEANUP_AGE_MS.
+   */
+  function read() {
+    ensureDir();
+    cleanupStale();
+
+    if (!fs.existsSync(fp)) {
+      const state = freshState(sessionId);
+      writeRaw(state);
+      return state;
+    }
+
+    try {
+      const raw = fs.readFileSync(fp, 'utf8');
+      const state = JSON.parse(raw);
+
+      // Check staleness — if older than TTL, start a new session
+      const age = Date.now() - new Date(state.session_start).getTime();
+      if (age > TTL_MS) {
+        const fresh = freshState(sessionId);
+        writeRaw(fresh);
+        return fresh;
+      }
+
+      return state;
+    } catch {
+      // Corrupted file — start fresh
+      const state = freshState(sessionId);
+      writeRaw(state);
+      return state;
+    }
+  }
+
+  /**
+   * Merge updates into this session's state and persist.
+   * @param {Object} updates — fields to merge (shallow)
+   */
+  function write(updates) {
+    const state = read();
+    Object.assign(state, updates);
+    writeRaw(state);
+    return state;
+  }
+
+  /**
+   * Increment a numeric field by 1 and persist.
+   * @param {string} field — the field name to increment
+   */
+  function increment(field) {
+    const state = read();
+    state[field] = (state[field] || 0) + 1;
+    writeRaw(state);
+    return state;
+  }
+
+  return { read, write, increment, stateFilePath: fp };
+}
+
+module.exports = { forSession };
