@@ -53,17 +53,28 @@ have filesystem access.
 ## Step 1b: Detect local skills
 
 Build the `local_skills` array by checking your available skills, slash
-commands, or rules. Only include project-specific skills — not built-in
-platform skills (like `/help`, `/clear`, etc.).
+commands, or rules. Include every skill **relevant to product development
+or the software development lifecycle** — anything a Forge workflow step
+could draw on, such as brainstorming, planning, requirements, estimation,
+architecture analysis, code review, debugging, testing, or documentation.
+Relevance — not whether the skill is project-specific — is the test: a
+general-purpose skill still counts if it supports SDLC work.
+
+A Forge workflow step can declare one of these as a *required* local skill,
+so under-declaring a relevant skill will block the step that depends on it.
+When in doubt, include it — over-declaring a relevant skill is harmless.
+
+Do NOT include skills unrelated to product/SDLC work (e.g. presentation,
+document, or spreadsheet builders, image or media generators) or built-in
+platform commands (`/help`, `/clear`, etc.) — Forge workflows never use these.
 
 | Source      | Where to look                                                   |
 |-------------|-----------------------------------------------------------------|
 | Codex       | Skills listed in the current session or loaded from the project |
 | Cursor      | Rules loaded from `.cursor/rules/` shown in your system context |
-| Windsurf    | Rules loaded from `.windsurf/rules/` shown in your system context |
 
 For each skill found, include `{ "name": "<skill-name>", "description": "<brief description>" }`.
-If no local skills are found, omit the `local_skills` parameter entirely.
+If no relevant local skills are found, omit the `local_skills` parameter entirely.
 
 ## Step 2: Route the request
 
@@ -287,21 +298,23 @@ not match the recommended tier.
 The response metadata contains a line like:
 
 ```
-**Model Routing**: tier=balanced | model=sonnet | complexity=medium | task=planning
+**Model Routing**: tier=balanced | model=gpt-5.4 | environment=codex | guidance=codex_model_map | complexity=medium | task=planning
 ```
 
-The `tier` value tells you which tier to use, and `model` gives you the exact
-parameter value to pass to the Agent tool.
+The `tier` value tells you which capability tier to use. The optional `model`
+value is only exact when the `guidance` variant names a maintained model map
+for your current environment. If no `model` is present, use the tier language
+only: pick your fastest, balanced, or most capable available model.
 
 ### How to delegate
 
-Use the `Agent` tool with the `model` parameter to delegate to the correct tier:
+Follow the instructions in the Model Routing block returned by Forge:
 
-| Recommended tier | model param | Agent call                                                     |
-|------------------|-------------|----------------------------------------------------------------|
-| **fast**         | low/fast model     | delegate only when Codex sub-agents are explicitly authorized |
-| **balanced**     | default model      | delegate only when Codex sub-agents are explicitly authorized |
-| **capable**      | stronger model     | delegate only when Codex sub-agents are explicitly authorized |
+| Routing signal | What to do |
+|----------------|------------|
+| `guidance=claude_code_model_map` | Use the concrete model parameter Forge provides. |
+| `guidance=codex_model_map` | Use the provided Codex model hint when your Agent or model switch supports it; otherwise choose the same tier in Codex. |
+| `guidance=model_agnostic_tier` | Do not invent a model name. Choose your tool's available model that matches the tier. |
 
 The sub-agent inherits your MCP tools and can call external connectors directly.
 
@@ -326,22 +339,22 @@ findings first, every time.
 
 ### Self-check: which tier are you?
 
-- **Haiku** → fast tier
-- **Sonnet** → balanced tier
-- **Opus** → capable tier
+- **fast** - lightweight/low-cost model tier
+- **balanced** - default reasoning model tier
+- **capable** - strongest available reasoning model tier
 
 If you already match the recommended tier, execute the instructions directly —
-no delegation needed. If you do NOT match, you MUST delegate using `Agent`.
+no delegation needed. If you do NOT match, delegate or switch using the
+environment-specific guidance Forge returned.
 
 ### Rules
 
 1. **Always check** — if `**Model Routing**` is present, evaluate it before
    executing the step instructions
-2. **Delegate both up and down** — if the tier says "capable" and you're
-   Sonnet, delegate up to Opus. If it says "fast" and you're Opus, delegate
-   down to Haiku
+2. **Delegate both up and down** — if the tier says "capable", use your
+   strongest available model; if it says "fast", use your lightweight model
 3. **Announce delegation** — briefly tell the user before delegating
-   (e.g., "Delegating to sonnet for this step…")
+   (e.g., "Delegating to a balanced model for this step...")
 4. **Pass the full prompt** — everything below `---DELEGATE BELOW---` in the
    instructions is the delegated prompt. Include all of it
 5. **Do NOT skip delegation** — direct execution is easier but costs 10-20x
