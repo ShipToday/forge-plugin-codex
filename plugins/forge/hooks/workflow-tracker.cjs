@@ -42,16 +42,27 @@ const WORKFLOW_ABANDON_PATTERN = 'forge__abandon_workflow';
 /**
  * Extract the human-readable text from a PostToolUse `tool_response`.
  *
- * MCP tool responses arrive as a structured object — `{ content: [{ type:
- * "text", text: "…" }] }` — not a string. `JSON.stringify`-ing that object
- * escapes every real newline into a literal `\n` sequence, which breaks any
- * regex that relies on `[^\n]` line boundaries or matches quoted/comma'd
- * content. This helper pulls the actual text payload so the extractors below
- * operate on the response as the orchestrator rendered it.
+ * MCP tool responses arrive as a structured payload — not a string —
+ * in one of two shapes depending on the client:
+ *   - Wrapped envelope: `{ content: [{ type: "text", text: "…" }] }`
+ *   - Bare content array: `[{ type: "text", text: "…" }]` (Claude Code)
+ *
+ * `JSON.stringify`-ing either shape escapes every real newline into a
+ * literal `\n` sequence, which breaks any regex that relies on `[^\n]`
+ * line boundaries or matches quoted/comma'd content. This helper pulls
+ * the actual text payload so the extractors below operate on the
+ * response as the orchestrator rendered it.
  */
 function responseText(response) {
   if (!response) return '';
   if (typeof response === 'string') return response;
+  // Bare content array (Claude Code's PostToolUse shape for MCP tools).
+  if (Array.isArray(response)) {
+    return response
+      .map((c) => (c && typeof c.text === 'string') ? c.text : '')
+      .join('\n');
+  }
+  // Wrapped envelope.
   if (Array.isArray(response.content)) {
     return response.content
       .map((c) => (c && typeof c.text === 'string') ? c.text : '')
