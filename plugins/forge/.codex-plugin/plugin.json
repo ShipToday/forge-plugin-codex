@@ -40,6 +40,8 @@
       "Break down PROJ-123 into implementation stories"
     ],
     "brandColor": "#111827",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
     "screenshots": []
   }
 }
