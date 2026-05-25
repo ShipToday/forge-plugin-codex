@@ -262,8 +262,19 @@ advances to a new step. The token rotates on every real step advance.
 
 If you delegate a step to a sub-agent, pass the current step's token
 into the sub-agent prompt verbatim — the sub-agent threads it through
-its own `update_state` call. The new token in the response goes to YOU
-(the parent), not the sub-agent — that's how the boundary stays clean.
+its own `update_state` call. The orchestrator's response to that call
+(carrying the *new* `step_token` and the next step's instructions) is
+delivered to whoever made the MCP call: the sub-agent. The sub-agent
+MUST return that response to you (the parent) **VERBATIM** so you can
+extract the new token before your next call. A summarized or
+paraphrased relay leaves the parent with a stale token and the next
+`update_state` call fails with a token-mismatch error — the new token
+lives ONLY in this response body; there is no state-fetch tool. The
+`STEP BOUNDARY` directive injected into delegated prompts repeats this
+requirement, but make it explicit in any sub-agent prompt you author
+too. This applies uniformly across Claude Code (Agent tool), Codex
+(`spawn_agent`), Cursor, and any other environment with sub-agent
+delegation.
 
 ### Escape hatch — `forge__abandon_workflow`
 

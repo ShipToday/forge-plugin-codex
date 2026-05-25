@@ -451,7 +451,7 @@ envelope, explain it plainly and offer to adjust:
 |---------------------------|------------------------------------------------|-------------------------------------------|
 | `admin_required`          | Caller is not an org admin                     | STOP — not recoverable in this session     |
 | `invalid_request`         | Payload failed schema validation               | Show `field` (and `step_index` if present), fix the value, retry |
-| `team_membership_required`| Team scope but caller not a member of the team | Switch to org scope or a different team   |
+| `team_not_in_org`         | Team scope but the supplied `team_id` does not belong to the caller's org (SHI-749) | Pick a team in your own org, or use org scope |
 | `team_not_found`          | `team_name` did not match any team in the org  | Show `available_teams` and ask which to use |
 | `team_store_unavailable`  | `team_name` used but team store is not wired   | Ask the admin to pass `team_id` directly  |
 | `duplicate_id`            | Workflow or skill id already exists            | Rename and retry                          |
@@ -558,7 +558,7 @@ plainly and offer the right recovery:
 | `admin_required`           | Caller is not an org admin                              | STOP — not recoverable in this session          |
 | `org_required`             | No org context on the session                           | STOP — ask admin to sign in to an org          |
 | `invalid_request`          | `workflow_id` missing or blank                          | Loop back to Step D1 and resolve the target    |
-| `team_membership_required` | Team-scoped target but caller is not in that team       | Pick a team the caller is a member of, or cancel |
+| `team_not_in_org`          | Team scope but the supplied `team_id` belongs to a different org (SHI-749) | Pick a team in your own org, or use org scope |
 | `team_not_found`           | `team_name` did not match any team in the org           | Show `available_teams` and ask which to use    |
 | `team_store_unavailable`   | `team_name` was used but the team store is not wired    | Ask the admin to pass `team_id` directly       |
 | `system_default_protected` | Attempted to delete a system default (store-enforced)   | STOP — system defaults cannot be deleted       |
