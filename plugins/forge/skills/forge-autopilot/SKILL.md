@@ -254,27 +254,55 @@ When you call `forge__update_state`, include the most recent token via
 matches the conversation's current step — a mismatch means the
 conversation has already advanced (typically a sub-agent advanced it
 without your knowledge), and the call is rejected with an actionable
-error pointing you at how to recover.
+error pointing you at `forge__get_workflow_state` for recovery.
 
 For relayed-question CHECKPOINT and RE-ENTRY responses the token does
 NOT rotate — re-use the same token until the workflow actually
 advances to a new step. The token rotates on every real step advance.
+
+### Sub-agent relay — verify the envelope, fetch canonical state when absent
 
 If you delegate a step to a sub-agent, pass the current step's token
 into the sub-agent prompt verbatim — the sub-agent threads it through
 its own `update_state` call. The orchestrator's response to that call
 (carrying the *new* `step_token` and the next step's instructions) is
 delivered to whoever made the MCP call: the sub-agent. The sub-agent
-MUST return that response to you (the parent) **VERBATIM** so you can
-extract the new token before your next call. A summarized or
-paraphrased relay leaves the parent with a stale token and the next
-`update_state` call fails with a token-mismatch error — the new token
-lives ONLY in this response body; there is no state-fetch tool. The
-`STEP BOUNDARY` directive injected into delegated prompts repeats this
-requirement, but make it explicit in any sub-agent prompt you author
-too. This applies uniformly across Claude Code (Agent tool), Codex
-(`spawn_agent`), Cursor, and any other environment with sub-agent
-delegation.
+MUST return that response to you (the parent) **VERBATIM**.
+
+To detect a missing envelope mechanically rather than heuristically, the
+orchestrator wraps the next-step instructions in a `<<<FORGE_NEXT_STEP
+token="…" bytes=N>>>` … `<<<END FORGE_NEXT_STEP>>>` envelope. After
+every sub-agent return:
+
+1. Scan the return for the envelope. If the opening or closing sentinel
+   is missing, the sub-agent didn't include the envelope in its return.
+2. If both sentinels are present, compute the UTF-8 byte length of the
+   body between them and compare against the `bytes=N` declared in the
+   opening sentinel. Mismatch = truncation or paraphrase.
+3. On either condition, call
+   `forge__get_workflow_state(conversation_id: "<id>")` to fetch the
+   canonical step body and current step_token. This is the designed
+   recovery channel — read-only, idempotent, and owner-checked.
+   Findings the sub-agent put in `display_text` are preserved as a
+   `## Findings` block in the fetched response, so no analytical
+   output is dropped — only the verbatim relay shortcut was skipped.
+
+**Diagnostic phrasing**: when this happens, describe it as a fetch
+("the envelope isn't in the sub-agent's return — fetching canonical
+state") rather than as a failure ("the relay was lost"). The findings
+layer is the system's designed answer to envelope-not-present, so the
+information path stayed intact even though the shortcut path didn't.
+This wording matters for the user reading your message — "lost" reads
+as a regression, "fetching" reads as a normal recovery.
+
+A summarized or paraphrased return without the envelope leaves the
+parent with a stale token if it doesn't fall through to the state
+fetch — the new token lives ONLY in the orchestrator's response body,
+and your parent CANNOT see the sub-agent's tool results. The `STEP
+BOUNDARY` directive injected into delegated prompts repeats this
+requirement and names the envelope explicitly. This applies uniformly
+across Claude Code (Agent tool), Codex (`spawn_agent`), Cursor, and
+any other environment with sub-agent delegation.
 
 ### Escape hatch — `forge__abandon_workflow`
 

@@ -276,6 +276,63 @@ purpose based on its `name`, `description`, and (if drafted) its
 so the admin sees what was inferred and can change it in the same
 edit pass — do not silently set the value.
 
+### Findings preservation in custom skill instructions
+
+When drafting a custom skill's `instructions` body, ask the admin a
+single question: **does this skill produce substantive analytical
+output (a scan summary, dashboard, breakdown, findings table, etc.)
+before pausing for the user**? If yes, the instruction body MUST teach
+its executor to populate a `display_text` field. Two patterns:
+
+- **Pattern A — the skill ends a step at a `required` or `ai_judgment`
+  confirmation gate** (the post-step gate): the executor's normal
+  completion payload should include
+  `display_text: "<the analytical markdown the executor just produced>"`.
+  The orchestrator strips it from persistent state and renders it as a
+  `## Findings` section above the gate CHECKPOINT body, so the parent
+  sees the findings even when a sub-agent only relays the gate
+  CHECKPOINT verbatim. Reference: `receive_epic_handoff` populates
+  `display_text` with its Issue Context Brief.
+
+- **Pattern B — the skill is a relayed-question skill** (the executor
+  emits `status: "needs_input"` to ask the user a domain question):
+  include `display_text` in the same `needs_input` payload. The
+  orchestrator renders it identically above the relayed-question
+  CHECKPOINT body. Reference: `architecture_discussion` and
+  `technical_discovery` populate `display_text` with their summary
+  markdown before the "Looks good?" confirmation.
+
+Why this matters: any analytical output rendered as the executor's
+own prose (before the `forge__update_state` tool call) dies on the
+sub-agent boundary — a delegated sub-agent's `STEP BOUNDARY` directive
+requires returning the orchestrator's CHECKPOINT body verbatim, and
+that body does NOT include the pre-tool-call prose unless the skill
+plumbs the findings through `display_text`. Without it, the parent
+agent has to re-derive the analysis from scratch (re-fetch the work
+item, re-scan the codebase) — the same token-waste / latency-spike
+SHI-751 was filed to fix.
+
+**Keep `display_text` concise — target ≤500 tokens.** It is a
+decision-context summary (headline + decision-relevant data), NOT a
+full duplicate of the markdown the skill rendered. The full content
+belongs in structured state fields the skill already populates (e.g.
+`pending_summary_text`, `pending_codebase_summary`, `dashboard_summary`,
+or skill-specific equivalents), which are recoverable via
+`forge__get_workflow_state` if the parent genuinely needs them. The
+orchestrator enforces a hard **8 KB cap** and truncates oversized
+payloads with a marker pointing at the recovery channel — well-behaved
+skills never trip it, but the cap bounds runaway content regardless of
+skill author behaviour.
+
+**Skip `display_text`** when the skill only asks user-intent questions
+("Approve?", "Edit fields?", "Send it?") with no analytical output, or
+when the question text already inlines all the context the user needs.
+Empty padding hurts readability.
+
+Surface this to the admin as part of the per-skill summary so they
+explicitly decide whether their skill needs the field — same posture
+as the SDLC stage proposal above.
+
 Render the full proposal to the admin: workflow-level fields first,
 then the ordered step list. For each step, also show the resolved
 `applicable_expression` you've chosen and (if applicable) the
@@ -441,6 +498,52 @@ the admin never has to look up a UUID.
 On success (`{ ok: true, workflow_id, scope }`), tell the admin the
 workflow is live and can be reached via the AI classifier when a
 user's request matches the workflow's `classifier_hint`.
+
+### Step 9a: Surface any soft warnings
+
+When the success response also includes a `warnings: [...]` array, the
+save committed but the server flagged something the admin should know
+about before runtime. The warning is non-blocking — the workflow IS
+live — but each entry deserves a sentence to the admin so they can
+self-correct in a follow-up edit pass.
+
+```json
+{
+  "ok": true,
+  "workflow_id": "...",
+  "scope": "org",
+  "warnings": [
+    {
+      "code": "missing_display_text_guidance",
+      "field": "new_skills.instructions",
+      "skill_id": "...",
+      "message": "..."
+    }
+  ]
+}
+```
+
+Currently the server emits one warning code:
+
+| Warning code                       | What it means                                                                                       | Offer                                                |
+|------------------------------------|-----------------------------------------------------------------------------------------------------|------------------------------------------------------|
+| `missing_display_text_guidance`    | A `new_skills.instructions` body OR a `preset_steps.instructions` full override emits `needs_input` without mentioning `display_text` — at runtime, any analytical output the executor renders before the tool call will die on the sub-agent boundary | Tell the admin which skill / step is affected (use the `skill_id` / `step_order` fields), summarise the risk in plain language, and offer to add `display_text` guidance in a quick follow-up `forge__save_workflow` call. If the admin says "no, this skill genuinely doesn't produce findings worth surfacing", accept and move on — the warning is soft by design. |
+
+Render the warnings inline with the success message, e.g.:
+
+> "✅ Workflow `security_review_strict` saved at **org** scope.
+>
+> One heads-up: your custom skill `internal_compliance_check` emits
+> `needs_input` but doesn't mention `display_text`. If the skill scans
+> the codebase or produces a structured findings table before asking
+> the auditor for approval, those findings will be lost when a
+> delegated sub-agent only relays the CHECKPOINT back to the parent.
+> Want me to update the skill's instructions to include `display_text`,
+> or is this skill intentionally just a routing prompt?"
+
+Do NOT block or re-prompt for save approval on a warning — the
+workflow already committed. The follow-up edit (if the admin chooses
+one) goes through the normal authoring loop.
 
 ## Step 10: Handle structured errors
 
