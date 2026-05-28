@@ -8,17 +8,16 @@
  *
  *   1. CHECKPOINT enforcement (V1, #518): when the orchestrator has emitted
  *      a relayed-question CHECKPOINT and the workflow-tracker hook has set
- *      `pending_checkpoint: true`, only user-question relay /
- *      forge__update_state / forge__abandon_workflow / read-only inspection
- *      may proceed.
+ *      `pending_checkpoint: true`, only AskUserQuestion / forge__update_state
+ *      / forge__abandon_workflow / read-only inspection may proceed.
  *
  *   2. Per-step tool_permissions enforcement (V2, this PR): when a workflow
  *      is active but no checkpoint is pending, the orchestrator publishes a
  *      `**Tool Permissions**: cat1, cat2, …` line on every step transition.
  *      The workflow-tracker hook mirrors that into `current_step_tools`.
  *      We deny tools whose category is not in the allowlist for the active
- *      step. Universal tools (Forge orchestration, user-question relay, and
- *      read-only inspection) are always allowed
+ *      step. Universal tools (Forge orchestration, Read/Grep/Glob,
+ *      AskUserQuestion, TodoWrite, web inspection) are always allowed
  *      regardless of step.
  *
  * Defensive defaults:
@@ -44,7 +43,7 @@ const sessionStateModule = require('./session-state.cjs');
 
 // -- Universal allowlist ----------------------------------------------------
 // Always-allowed tools regardless of active step. Forge orchestration,
-// Codex primitives that cannot mutate state, and the user-question
+// Claude Code primitives that cannot mutate state, and the user-question
 // relay path.
 
 const ALWAYS_ALLOWED_BARE_NAMES = new Set([
@@ -53,11 +52,9 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'forge__abandon_workflow',
   'forge__start_workflow',
   'forge__get_workflow_state', // Read-only recovery channel; safe to call mid-CHECKPOINT
-  // Question relay — the way for the model to talk to the user mid-step
+  // Question relay — the only way for the model to talk to the user mid-step
   'AskUserQuestion',
-  'request_user_input',
-  'functions.request_user_input',
-  // Read-only or local-only primitives
+  // Claude Code primitives — read-only or local-only, cannot mutate external state
   'Read',
   'Grep',
   'Glob',
@@ -83,8 +80,8 @@ const READONLY_PREFIXES = ['list_', 'get_', 'search_', 'query_', 'fetch_', 'read
 
 const CATEGORY_PATTERNS = {
   read_code:    [/^Read$/, /^Grep$/, /^Glob$/],
-  ask_user:     [/^AskUserQuestion$/, /^request_user_input$/, /^functions\.request_user_input$/],
-  web:          [/^WebFetch$/, /^WebSearch$/, /^web\.run$/],
+  ask_user:     [/^AskUserQuestion$/],
+  web:          [/^WebFetch$/, /^WebSearch$/],
 
   tracker_read: [
     /^list_issues$/, /^get_issue$/, /^get_issue_status$/, /^list_issue_statuses$/,
@@ -110,12 +107,9 @@ const CATEGORY_PATTERNS = {
   docs_read:    [
     /^notion-search$/, /^notion-fetch$/, /^notion-get-comments$/,
     /^notion-get-teams$/, /^notion-get-users$/,
-    /^notion_search$/, /^notion_fetch$/, /^notion_get_comments$/,
-    /^notion_get_teams$/, /^notion_get_users$/,
   ],
   docs_write:   [
     /^notion-create-/, /^notion-update-/, /^notion-move-/, /^notion-duplicate-/,
-    /^notion_create_/, /^notion_update_/, /^notion_move_/, /^notion_duplicate_/,
   ],
 
   messaging:    [/^slack_/, /^send_message$/],
@@ -137,8 +131,8 @@ const CATEGORY_PATTERNS = {
     /^get_account_info$/,
   ],
 
-  code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/, /^apply_patch$/, /^functions\.apply_patch$/],
-  shell:        [/^Bash$/, /^PowerShell$/, /^shell_command$/, /^functions\.shell_command$/],
+  code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/],
+  shell:        [/^Bash$/, /^PowerShell$/],
 };
 
 // -- Helpers ----------------------------------------------------------------
@@ -188,7 +182,7 @@ function buildCheckpointDenyReason(state, toolName) {
     `Tool "${toolName}" cannot proceed until the user has answered.`,
     ``,
     'You have three options:',
-    '  1. Ask the user the pending question.',
+    '  1. Call AskUserQuestion to relay the pending question to the user.',
     '  2. Call forge__update_state with the user\'s answer (set state_updates.user_answer).',
     '  3. Call forge__abandon_workflow with a meaningful reason if the workflow no longer applies.',
     ``,
@@ -206,7 +200,7 @@ function buildStepPermissionDenyReason(state, toolName, category) {
     ``,
     'Likely you are trying to do work that belongs to a later step. Options:',
     '  1. Continue the current step and call forge__update_state to advance — the next step may allow this tool.',
-    '  2. Ask the user if they need to make a decision before this step can complete.',
+    '  2. Call AskUserQuestion if the user needs to make a decision before this step can complete.',
     '  3. Call forge__abandon_workflow with a meaningful reason if the workflow no longer applies.',
     ``,
     'Do NOT silently bypass the workflow. The audit trail is how the team learns when workflows misroute.',
@@ -231,14 +225,14 @@ async function main() {
   const toolName = event.tool_name || '';
   if (!toolName) return; // Nothing to gate
 
-  // Scope state to this session.
+  // Scope state to this Claude Code session.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
   if (!state.active_workflow) return; // No workflow active — allow
 
   const bare = bareName(toolName);
 
-  // Universals always pass — Forge orchestration, user-question relay, read-only.
+  // Universals always pass — Forge orchestration, AskUserQuestion, read-only.
   if (isUniversallyAllowed(bare)) return;
 
   // Layer 1: CHECKPOINT enforcement.

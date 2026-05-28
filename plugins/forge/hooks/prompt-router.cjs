@@ -11,12 +11,12 @@
  * The hook fires for two things the LLM cannot reliably decide on its own:
  *
  *   1. **Epic key references** (e.g. "explore architecture of SHI-615").
- *      Skill discovery is a soft signal and Codex can choose to bypass
+ *      Skill discovery is a soft signal and Claude can choose to bypass
  *      Forge when it has alternative tools (Linear MCP, Read, Grep) that
  *      look usable. A regex match on a tracked work item id is a strong
  *      structural signal and gets an ADVISORY routing directive — a hint
  *      that surfaces the key and recommends Forge, but yields agency to
- *      Codex when the conversation context warrants a different route
+ *      Claude when the conversation context warrants a different route
  *      (SHI-678). The regex is purely structural — it knows nothing
  *      about workflows or skills, so adding new ones requires no changes
  *      here.
@@ -56,7 +56,7 @@ function emitWakeConditionCheck(wakeCondition) {
     `FORGE ROUTING: This session is snoozed. ` +
     `Wake condition: "${wakeCondition}". ` +
     `Evaluate if the user's current message signals readiness. ` +
-    `If yes, you MUST use the "forge-autopilot" skill BEFORE responding ` +
+    `If yes, you MUST invoke the "forge-autopilot" skill via the Skill tool BEFORE responding ` +
     `with the input: "observe session — start the observe_session workflow for passive tracking". ` +
     `If no, continue normally and do NOT mention this check to the user.`
   );
@@ -66,19 +66,19 @@ function emitEpicKeyRouting(key) {
   // SHI-678: advisory tone (was forced "MUST invoke"). The orchestrator
   // now handles cited-reference disambiguation via `needsKeyConfirmation`,
   // so the hook no longer needs to force the routing path. The hint
-  // remains because it's the structural signal that nudges Codex away
+  // remains because it's the structural signal that nudges Claude away
   // from grabbing the work item directly via tracker MCP tools when
   // Forge is the appropriate orchestrator — but final agency stays with
-  // Codex when the conversation context warrants a different choice.
+  // Claude when the conversation context warrants a different choice.
   process.stdout.write(
     `FORGE ROUTING (advisory): The user's message references work item "${key}". ` +
-    `Consider using the "forge-autopilot" skill — Forge orchestrates ` +
+    `Consider invoking the "forge-autopilot" skill via the Skill tool — Forge orchestrates ` +
     `the SDLC actions (planning, implementation, review, status) for tracked work items, ` +
     `and routing through it keeps the audit trail intact. ` +
     `If you fetch the ticket via Linear/Jira/etc. directly, prefer doing so as part of a ` +
     `Forge workflow rather than ad-hoc; the workflow's first step typically does the fetch ` +
     `and threads the result into the rest of the journey. ` +
-    `If Codex is in a planning/dry-run mode, the same ` +
+    `If your harness is in a planning/dry-run mode (e.g. Claude Code's plan mode), the same ` +
     `recommendation applies: invoke forge-autopilot, fetch the workflow, execute its read-only ` +
     `steps, and present any writes as part of the plan — defer those writes until plan mode exits. ` +
     `Pass the user's full message as the input to the skill. ` +
@@ -119,7 +119,8 @@ async function main() {
     prompt = input.trim();
   }
 
-  // Read session state, scoped to this session.
+  // Read session state — scoped to this Claude Code session so concurrent
+  // sessions in the same directory each track their own workflow.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
 
@@ -152,7 +153,7 @@ async function main() {
   // Step 1: Linked sessions need no directives — already tracked
   if (state.status === 'linked') return;
 
-  // Step 2: Active workflow -> tell Codex to continue, not start fresh
+  // Step 2: Active workflow → tell Claude to continue, not start fresh
   if (state.active_workflow) {
     emitWorkflowContinuation(state.conversation_id, state.current_skill);
     return;
@@ -161,7 +162,7 @@ async function main() {
   // Step 3: Epic key in prompt → forced routing directive (wins over
   // snoozed/dismissed because the user is explicitly referencing tracked work).
   // This is the only content-based signal the hook acts on. It catches the
-  // case where Codex would otherwise bypass Forge in favor of fetching the
+  // case where Claude would otherwise bypass Forge in favor of fetching the
   // work item directly via Linear/Jira/etc.
   if (prompt) {
     const keyMatch = prompt.match(EPIC_KEY_RE);
@@ -172,7 +173,7 @@ async function main() {
     }
   }
 
-  // Step 4: Snoozed -> ask Codex to re-evaluate against the wake condition
+  // Step 4: Snoozed → ask Claude to re-evaluate against the wake condition
   if (state.status === 'snoozed') {
     const wake = state.wake_condition || 'user signals readiness to move forward';
     emitWakeConditionCheck(wake);

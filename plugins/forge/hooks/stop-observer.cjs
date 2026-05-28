@@ -3,19 +3,28 @@
 /**
  * stop-observer.js — Stop hook for passive session observation.
  *
- * Fires after Codex finishes responding. If the session is untracked,
- * blocks Codex's exit and provides a continuation turn where Codex can
+ * Fires after Claude finishes responding. If the session is untracked,
+ * blocks Claude's exit and provides a continuation turn where Claude can
  * evaluate the session and invoke session_observer for passive tracking.
  *
  * This replaces the old two-step handoff (AssistantResponse sets flag →
- * UserPromptSubmit emits nudge). The Stop hook lets Codex answer the
+ * UserPromptSubmit emits nudge). The Stop hook lets Claude answer the
  * user's question FIRST, then evaluate for tracking — no interruption.
  *
  * Execution:
  *   1. Exit if stop_hook_active (prevent infinite loop)
  *   2. Increment turn_count (tracks conversation progress)
  *   3. For linked/logged: checkpoint every CHECKPOINT_INTERVAL turns
- *      (silent audit event capturing elapsed engineering time)
+ *      (silent audit event capturing elapsed engineering time — runs
+ *      regardless of forge_observation_enabled because the gate is
+ *      about the observation NUDGE, not about engineering-time
+ *      tracking for already-tracked sessions).
+ *   3b. SHI-759: exit silently if the per-session cache says the org
+ *      admin has disabled observation (forge_observation_enabled =
+ *      false). Steady-state zero-roundtrip — no MCP call until the
+ *      next Claude Code session starts (which begins with a fresh
+ *      cache). Field is written into the cache by the session_observer
+ *      gated path (SHI-758) when it first detects the admin opt-out.
  *   4. For snoozed: re-fire observer every CHECKPOINT_INTERVAL turns
  *      (re-prompts user to track)
  *   5. Exit if dismissed (terminal — never re-fires)
@@ -23,19 +32,19 @@
  *   6. Exit if active_workflow (workflow tracks its own time)
  *   7. Exit if observer_blocked (already evaluated this session)
  *   8. Set observer_blocked = true in session state
- *   9. Block with reason directing Codex to evaluate and invoke session_observer
+ *   9. Block with reason directing Claude to evaluate and invoke session_observer
  *
  * Design principles:
- *   - Fires after Codex responds — user gets their answer first.
+ *   - Fires after Claude responds — user gets their answer first.
  *   - Blocks only once per session for initial observation (observer_blocked flag).
  *   - Re-fires periodically for linked/logged sessions to capture
  *     engineering time that would otherwise go untracked.
  *   - Re-fires periodically for snoozed sessions to re-prompt the user.
  *   - active_workflow is set by forge-autopilot after a workflow actually
  *     starts — not by prompt-router at detection time. This means if
- *     Codex ignores a routing directive, active_workflow stays false
+ *     Claude ignores a routing directive, active_workflow stays false
  *     and this hook will still fire for passive observation.
- *   - The reason text tells Codex to invoke forge-autopilot for tracking.
+ *   - The reason text tells Claude to invoke forge-autopilot for tracking.
  *
  * @see plugin/hooks/prompt-router.cjs for active PDLC/epic detection
  * @see plugin/hooks/session-state.cjs for state management
@@ -55,7 +64,7 @@ const FLUSH_INTERVAL = 3;      // turns between checkpoints when skill invocatio
 // -- Directives ---------------------------------------------------------------
 
 /**
- * Build a silent checkpoint directive. Tells Codex to call forge__update_state
+ * Build a silent checkpoint directive. Tells Claude to call forge__update_state
  * with the elapsed duration — no user interaction, no visible output.
  *
  * The directive embeds `last_observer_conversation_id` — the conversation
@@ -83,7 +92,7 @@ function buildCheckpointResponse(elapsedMs, state, stateFilePath) {
       `FORGE CHECKPOINT: This is an automatic, silent checkpoint to record engineering time. ` +
       `Do NOT mention this to the user. Do NOT ask any questions. ` +
       `Session state file: ${stateFilePath} ` +
-      `Immediately use the "forge-autopilot" skill with the input: ` +
+      `Immediately invoke the "forge-autopilot" skill via the Skill tool with the input: ` +
       `"session checkpoint — call forge__update_state with ` +
       `conversation_id: ${conversationId}, completed_step: session_observer, ` +
       `state_updates: { outcome: checkpoint, duration_ms: ${elapsedMs}, ` +
@@ -119,7 +128,7 @@ function buildBlockResponse(stateFilePath) {
       `- Investigating a bug by reading logs or tracing code paths (this is Definition or Execution)\n` +
       `- Making code changes and committing them, even small ones (this is Execution)\n` +
       `- Discussing how a feature should work or what to build next (this is Definition or Planning)\n\n` +
-      `If the session involves ANY of the above activities, you MUST use the "forge-autopilot" skill ` +
+      `If the session involves ANY of the above activities, you MUST invoke the "forge-autopilot" skill via the Skill tool ` +
       `with the input: "observe session — start the observe_session workflow for passive tracking". ` +
       `Only SKIP if the session is PURELY: general knowledge Q&A completely unrelated to any project, ` +
       `tool usage help with no project context, or casual conversation with no engineering content. ` +
@@ -148,7 +157,7 @@ async function main() {
   // Step 1: Prevent infinite loop — already in a forced-continuation state
   if (event.stop_hook_active) return;
 
-  // Read session state, scoped to this session.
+  // Read session state — scoped to this Claude Code session.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
 
@@ -181,6 +190,28 @@ async function main() {
     process.stdout.write(buildCheckpointResponse(elapsedMs, state, sessionState.stateFilePath));
     return;
   }
+
+  // Step 3b: SHI-759 — per-session observation gate cache.
+  //
+  // When the MCP-side session_observer skill runs and detects that the
+  // org admin has disabled observation (Clerk publicMetadata.
+  // forgeObservationEnabled = false, surfaced by the orchestrator's
+  // org-settings hydrator), its gated payload tells the parent to
+  // write forge_observation_enabled: false into this session's state
+  // file. On every subsequent Stop in the same Claude Code session,
+  // this check short-circuits silently so the hook does NOT re-invoke
+  // session_observer — saving one MCP round-trip per turn for the
+  // steady state. Strict `=== false` so cache misses (null /
+  // undefined / true / non-boolean) fall through to the normal
+  // directive, preserving the opt-out semantics that match the
+  // dashboard's default-true contract.
+  //
+  // Placed AFTER the linked/logged checkpoint branch so that
+  // engineering-time tracking on already-tracked sessions continues
+  // independently of the observation toggle — the toggle gates the
+  // initial nudge, not silent checkpoints on linked/logged work.
+  // Field name shared verbatim with SHI-741 (Cursor parity).
+  if (state.forge_observation_enabled === false) return;
 
   // Step 4: Snoozed sessions — re-fire observer every CHECKPOINT_INTERVAL turns
   if (state.status === 'snoozed') {
@@ -221,7 +252,7 @@ async function main() {
   // observer never fired" case, not the "observer fired, user ignored it" case).
   sessionState.write({ observer_blocked: true, observer_fired: true });
 
-  // Step 9: Block Codex's exit and direct it to evaluate the session
+  // Step 9: Block Claude's exit and direct it to evaluate the session
   process.stdout.write(buildBlockResponse(sessionState.stateFilePath));
 }
 

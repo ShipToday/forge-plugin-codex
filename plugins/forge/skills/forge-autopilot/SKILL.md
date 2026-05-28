@@ -271,15 +271,24 @@ MUST return that response to you (the parent) **VERBATIM**.
 
 To detect a missing envelope mechanically rather than heuristically, the
 orchestrator wraps the next-step instructions in a `<<<FORGE_NEXT_STEP
-token="…" bytes=N>>>` … `<<<END FORGE_NEXT_STEP>>>` envelope. After
-every sub-agent return:
+token="…" bytes=N>>>` … `<<<END FORGE_NEXT_STEP>>>` envelope. The
+parser accepts the envelope on **sentinels + token**; `bytes=N` is an
+optional integrity annotation. After every sub-agent return:
 
-1. Scan the return for the envelope. If the opening or closing sentinel
-   is missing, the sub-agent didn't include the envelope in its return.
-2. If both sentinels are present, compute the UTF-8 byte length of the
-   body between them and compare against the `bytes=N` declared in the
-   opening sentinel. Mismatch = truncation or paraphrase.
-3. On either condition, call
+1. Scan the return for the envelope. If either sentinel is missing —
+   or the opening sentinel is restructured so `token="…"` no longer
+   sits on it — the sub-agent didn't include a parseable envelope.
+2. If both sentinels are present AND the opening sentinel declares
+   `bytes=N`, compute the UTF-8 byte length of the body between them
+   and compare against `N`. Mismatch = the sub-agent paraphrased
+   inside otherwise-correct sentinels.
+3. If both sentinels are present but `bytes=N` is **absent** (a
+   common smaller-model paraphrase mode — the agent keeps the
+   sentinel shape but drops the byte count as "boring metadata"),
+   trust the envelope on sentinel + token alone. No fetch needed —
+   the next-step body is good as-is.
+4. On a step-1 fail (missing/restructured sentinels) OR step-2
+   mismatch (declared bytes don't match), call
    `forge__get_workflow_state(conversation_id: "<id>")` to fetch the
    canonical step body and current step_token. This is the designed
    recovery channel — read-only, idempotent, and owner-checked.
