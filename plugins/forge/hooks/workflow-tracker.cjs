@@ -181,19 +181,24 @@ function extractCurrentStepSkill(response) {
   return null;
 }
 
-// Maps session_observer outcome values to local session status.
-// "linked" is handled separately (observer launches a workflow → active_workflow: true).
-// "observation_disabled" (org-admin gate fired — SHI-758/SHI-759) maps to "logged"
-// because the server still records the suppressed-observation row in audit_events;
-// the session is audit-tracked, just not nudged. The corresponding cache-flag write
-// (`forge_observation_enabled: false`) is layered on in the main handler below so
-// the SHI-759 stop-observer hook can short-circuit subsequent Stops without an
-// MCP round-trip.
+// Maps session_observer outcome values to local session status. These are
+// the outcomes carried on a normal `event_type: "observation_outcome"`
+// payload — the user engaged with the nudge. "linked" is handled separately
+// (observer launches a workflow → active_workflow: true).
+//
+// The org-disabled gate is deliberately NOT in this map. It arrives as
+// outcome "observation_disabled" with event_type "observation_skipped" (so
+// the orchestrator suppresses the audit row — see src/orchestrator.js and
+// src/skills/intake/session-observer.js → buildObservationGatedCompletion)
+// and is handled separately by extractObservationGate below. It must NOT map
+// to a tracking status like "logged": a disabled org is not tracked, and a
+// "logged" status would make stop-observer.cjs fire periodic engineering-time
+// checkpoints for it. The only thing the gate writes is the per-session +
+// cross-session `forge_observation_enabled: false` cache flag.
 const OUTCOME_TO_STATUS = {
   ad_hoc: 'logged',
   snoozed: 'snoozed',
   dismissed: 'dismissed',
-  observation_disabled: 'logged',
 };
 
 /**
@@ -213,6 +218,32 @@ function extractObserverEvent(event) {
   const status = OUTCOME_TO_STATUS[updates.outcome] || null;
   if (!status) return null;
   return { status, outcome: updates.outcome };
+}
+
+/**
+ * Detect the org-disabled gate completion from a forge__update_state input.
+ *
+ * The session_observer gated-completion payload
+ * (src/skills/intake/session-observer.js → buildObservationGatedCompletion)
+ * carries `outcome: "observation_disabled"` — currently with
+ * `event_type: "observation_skipped"` so the orchestrator suppresses the
+ * audit row. We key off the OUTCOME (not the event_type) so detection stays
+ * robust if that audit-suppression event_type is ever renamed. This is
+ * separate from extractObserverEvent because the gate maps to no tracking
+ * status (a disabled org is not tracked); its only effect is pinning the
+ * per-session + cross-session `forge_observation_enabled: false` cache so
+ * stop-observer.cjs short-circuits subsequent Stops (and subsequent
+ * sessions) without re-firing the directive.
+ *
+ * Returns true for the gate, false otherwise.
+ */
+function extractObservationGate(event) {
+  let input = event.tool_input || {};
+  if (typeof input === 'string') {
+    try { input = JSON.parse(input); } catch { return false; }
+  }
+  const updates = input.state_updates;
+  return !!updates && updates.outcome === 'observation_disabled';
 }
 
 /**
@@ -337,9 +368,28 @@ async function main() {
   // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
+    // Org-disabled gate backstop (SHI-758/759). The session_observer gated
+    // completion tells the AI parent to write forge_observation_enabled: false
+    // into the per-session state file, but the parent "consistently forgets
+    // because the MCP response's large instruction block captures its
+    // attention" (file header) — confirmed on disk: disabled-org sessions that
+    // completed the full observe_session round-trip still ended with
+    // forge_observation_enabled: null. This hook makes the write reliable so
+    // the rest of THIS session short-circuits (Step 3b in stop-observer.cjs)
+    // without re-invoking Forge. The flag is per-session by design: each new
+    // session re-checks, so an admin re-enabling the observer is picked up at
+    // the next session start. No tracking status is set — a disabled org is
+    // not tracked. Keyed off outcome (not event_type), so it fires for the
+    // current `observation_skipped` payload and survives an event_type rename.
+    if (extractObservationGate(event)) {
+      sessionState.write({ forge_observation_enabled: false });
+      // Don't return — a single-step gated workflow also reports completion
+      // below, which clears active_workflow / sets observer_blocked.
+    }
+
     const observerEvent = extractObserverEvent(event);
     if (observerEvent) {
-      const { status: observerStatus, outcome } = observerEvent;
+      const { status: observerStatus } = observerEvent;
       const statusUpdates = {
         status: observerStatus,
         last_checkpoint_at: new Date().toISOString(),
@@ -347,14 +397,6 @@ async function main() {
       // For dismissed/no_observation, also block re-observation
       if (observerStatus === 'dismissed') {
         statusUpdates.observer_blocked = true;
-      }
-      // For observation_disabled (org-admin gate fired), pin the per-session
-      // cache flag so SHI-759's stop-observer.cjs Step 3b read sees `=== false`
-      // on subsequent Stops and short-circuits without an MCP round-trip.
-      // This is the backstop for the documented gated-payload state write —
-      // if the AI parent forgets, this hook makes the steady-state still cheap.
-      if (outcome === 'observation_disabled') {
-        statusUpdates.forge_observation_enabled = false;
       }
       sessionState.write(statusUpdates);
       // Don't return — still check for workflow completion below

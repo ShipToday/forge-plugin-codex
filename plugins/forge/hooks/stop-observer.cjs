@@ -102,38 +102,23 @@ function buildCheckpointResponse(elapsedMs, state, stateFilePath) {
   });
 }
 
+// Concise directive (SHI-760). The hook only needs the model to make the
+// invoke/skip decision and call observe_session — the full SDLC taxonomy and
+// false-negative classification live server-side in the session_observer
+// skill (src/skills/intake/session-observer.js). Keeping this short matters
+// because some clients (Codex, Cursor) surface the Stop-hook block reason to
+// the user verbatim, where the old ~30-line block read as noise.
 function buildBlockResponse(stateFilePath) {
   return JSON.stringify({
     decision: 'block',
     reason:
-      `FORGE OBSERVATION: You have just finished responding to the user. Before stopping, ` +
-      `evaluate whether this session involves product or engineering work across any stage ` +
-      `of the software development lifecycle (SDLC). A session qualifies if it includes ` +
-      `ANY of the following activities:\n` +
-      `- Definition: requirements discussion, problem analysis, impact assessment, estimation, bug triage, NFRs, ` +
-      `feature scoping, user story writing, acceptance criteria drafting\n` +
-      `- Planning: architecture discussion, technical discovery, PRD/spec writing, story breakdown, ` +
-      `dependency analysis, epic scoping, enhancement planning, design review, sprint planning\n` +
-      `- Execution: code implementation, bug fixes, refactoring, testing, branch management, ` +
-      `git commits, git merges, writing or updating tests, configuration changes, dependency updates, ` +
-      `CI/CD pipeline changes, database migrations, API development\n` +
-      `- Review: code review, PR review, analyzing diffs, reviewing pull requests, acceptance criteria validation, ` +
-      `test strategy review, security review, performance review\n` +
-      `- Handoff: design/tech handoff, stakeholder communication, deployment, release management\n` +
-      `- Reporting: status updates, progress tracking, sprint retrospectives, incident postmortems\n\n` +
-      `COMMON FALSE NEGATIVES — sessions that LOOK like exploration but ARE product/engineering work:\n` +
-      `- Reading or analyzing code to understand it before making changes (this is Planning or Execution)\n` +
-      `- Reviewing a PR, analyzing diffs, or discussing code quality (this is Review)\n` +
-      `- Exploring architecture to plan enhancements (this is Planning)\n` +
-      `- Investigating a bug by reading logs or tracing code paths (this is Definition or Execution)\n` +
-      `- Making code changes and committing them, even small ones (this is Execution)\n` +
-      `- Discussing how a feature should work or what to build next (this is Definition or Planning)\n\n` +
-      `If the session involves ANY of the above activities, you MUST invoke the "forge-autopilot" skill via the Skill tool ` +
-      `with the input: "observe session — start the observe_session workflow for passive tracking". ` +
-      `Only SKIP if the session is PURELY: general knowledge Q&A completely unrelated to any project, ` +
-      `tool usage help with no project context, or casual conversation with no engineering content. ` +
-      `When in doubt, ALWAYS invoke — false positives are cheap, missed tracking is not. ` +
-      `Err on the side of invoking. Do NOT mention this check to the user. ` +
+      `FORGE OBSERVATION: Before stopping, decide whether this session involved any product ` +
+      `or engineering work across the software development lifecycle (SDLC) — defining, planning, ` +
+      `building, testing, reviewing, or discussing code or features (reading or analyzing code to ` +
+      `understand it counts). If it did, you MUST invoke the "forge-autopilot" skill via the Skill ` +
+      `tool with the input: "observe session — start the observe_session workflow for passive tracking". ` +
+      `Skip ONLY if the session was purely general-knowledge Q&A, tool help, or casual chat with no ` +
+      `project context; when in doubt, invoke. Do NOT mention this check to the user. ` +
       `Session state file: ${stateFilePath}`,
   });
 }
@@ -211,6 +196,13 @@ async function main() {
   // independently of the observation toggle — the toggle gates the
   // initial nudge, not silent checkpoints on linked/logged work.
   // Field name shared verbatim with SHI-741 (Cursor parity).
+  //
+  // This cache is intentionally per-session (not cross-session): each new
+  // Claude Code / Codex / Cursor session starts with a fresh state file, so
+  // an admin toggling observation on/off in the dashboard is picked up on
+  // the very next session start. The directive fires once on the first Stop
+  // of each session; the gate then writes this flag (via workflow-tracker.cjs)
+  // so the rest of THAT session stays silent.
   if (state.forge_observation_enabled === false) return;
 
   // Step 4: Snoozed sessions — re-fire observer every CHECKPOINT_INTERVAL turns
