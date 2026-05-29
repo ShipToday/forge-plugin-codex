@@ -15,8 +15,8 @@
  *   3. Workflow completion: forge__update_state returns a completed workflow
  *      → writes { active_workflow: false, observer_blocked: true }
  *
- * This replaces the previous approach of asking Codex to write the state
- * file via SKILL.md instructions — Codex can miss this because the
+ * This replaces the previous approach of asking Claude to write the state
+ * file via SKILL.md instructions — Claude consistently forgot because the
  * MCP response's large instruction block captured its attention.
  *
  * @see plugin/hooks/session-state.cjs for state management
@@ -183,25 +183,36 @@ function extractCurrentStepSkill(response) {
 
 // Maps session_observer outcome values to local session status.
 // "linked" is handled separately (observer launches a workflow → active_workflow: true).
+// "observation_disabled" (org-admin gate fired — SHI-758/SHI-759) maps to "logged"
+// because the server still records the suppressed-observation row in audit_events;
+// the session is audit-tracked, just not nudged. The corresponding cache-flag write
+// (`forge_observation_enabled: false`) is layered on in the main handler below so
+// the SHI-759 stop-observer hook can short-circuit subsequent Stops without an
+// MCP round-trip.
 const OUTCOME_TO_STATUS = {
   ad_hoc: 'logged',
   snoozed: 'snoozed',
   dismissed: 'dismissed',
+  observation_disabled: 'logged',
 };
 
 /**
- * Extract observer outcome from a forge__update_state tool input.
- * Returns the local status string if this is an observation_outcome event,
- * or null otherwise.
+ * Extract observer event metadata from a forge__update_state tool input.
+ * Returns `{ status, outcome }` if this is a recognised observation_outcome
+ * event, or null otherwise. `status` is the mapped local session status;
+ * `outcome` is the raw outcome string the caller can branch on for
+ * outcome-specific side effects (e.g. the SHI-759 cache-flag pin).
  */
-function extractObserverStatus(event) {
+function extractObserverEvent(event) {
   let input = event.tool_input || {};
   if (typeof input === 'string') {
     try { input = JSON.parse(input); } catch { return null; }
   }
   const updates = input.state_updates;
   if (!updates || updates.event_type !== 'observation_outcome') return null;
-  return OUTCOME_TO_STATUS[updates.outcome] || null;
+  const status = OUTCOME_TO_STATUS[updates.outcome] || null;
+  if (!status) return null;
+  return { status, outcome: updates.outcome };
 }
 
 /**
@@ -241,15 +252,16 @@ async function main() {
     return; // Malformed input — exit silently
   }
 
-  // Scope state to this session.
+  // Scope state to this Claude Code session so concurrent sessions in the
+  // same directory each track their own workflow.
   const sessionState = sessionStateModule.forSession(event.session_id);
 
   const toolName = event.tool_name || '';
   const toolResponse = event.tool_response || '';
 
-  // Track local skill invocations from the model runtime.
-  // The PostToolUse hook fires for ALL tool calls. We record which local
-  // skills the AI invoked so the
+  // Track local skill invocations via the Skill tool (Claude Code).
+  // The PostToolUse hook fires for ALL tool calls — including the built-in
+  // Skill tool. We record which local skills the AI invoked so the
   // stop-observer checkpoint can flush them to the Forge audit trail.
   if (toolName === 'Skill') {
     let toolInput = event.tool_input || {};
@@ -322,11 +334,12 @@ async function main() {
 
   // Observer outcome: when session_observer completes via forge__update_state,
   // persist the status to the local session state file so stop-observer can
-  // use it for checkpoint logic. Codex is instructed to write this itself,
+  // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
-    const observerStatus = extractObserverStatus(event);
-    if (observerStatus) {
+    const observerEvent = extractObserverEvent(event);
+    if (observerEvent) {
+      const { status: observerStatus, outcome } = observerEvent;
       const statusUpdates = {
         status: observerStatus,
         last_checkpoint_at: new Date().toISOString(),
@@ -335,6 +348,14 @@ async function main() {
       if (observerStatus === 'dismissed') {
         statusUpdates.observer_blocked = true;
       }
+      // For observation_disabled (org-admin gate fired), pin the per-session
+      // cache flag so SHI-759's stop-observer.cjs Step 3b read sees `=== false`
+      // on subsequent Stops and short-circuits without an MCP round-trip.
+      // This is the backstop for the documented gated-payload state write —
+      // if the AI parent forgets, this hook makes the steady-state still cheap.
+      if (outcome === 'observation_disabled') {
+        statusUpdates.forge_observation_enabled = false;
+      }
       sessionState.write(statusUpdates);
       // Don't return — still check for workflow completion below
     }
@@ -342,9 +363,9 @@ async function main() {
     // Relayed-question pending_checkpoint pin/clear.
     //
     // When the orchestrator emits **CHECKPOINT** (relayed-question skill is
-    // awaiting user input via the parent's user-question relay), record the pin
+    // awaiting user input via the parent's AskUserQuestion), record the pin
     // so the future workflow-guard PreToolUse hook can deny tool calls other
-    // than user-question relay / forge__update_state until the user has answered.
+    // than AskUserQuestion / forge__update_state until the user has answered.
     // The pin clears on **RE-ENTRY** (the user's answer flowed back), or
     // implicitly on workflow completion / abandonment below.
     const pendingStep = extractPendingCheckpointStep(toolResponse);
@@ -413,5 +434,5 @@ async function main() {
 }
 
 main().catch(() => {
-  // Fail silently — never interfere with Codex's response
+  // Fail silently — never interfere with Claude's response
 });

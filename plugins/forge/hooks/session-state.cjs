@@ -86,10 +86,10 @@ function freshState(sessionId) {
     skills_flushed_at_turn: 0, // Turn count at last skill invocation flush
     // Relayed-question pin: set when forge__update_state returns a
     // **CHECKPOINT** response (skill is awaiting user input via
-    // user-question relay). Cleared on **RE-ENTRY** (answer flowed back),
+    // AskUserQuestion). Cleared on **RE-ENTRY** (answer flowed back),
     // normal step advance, workflow completion, or abandonment.
     // The workflow-guard PreToolUse hook reads this to deny tool calls
-    // other than user-question relay / forge__update_state /
+    // other than AskUserQuestion / forge__update_state /
     // forge__abandon_workflow until the user has answered.
     pending_checkpoint: false,
     pending_checkpoint_step: null,    // Skill id pinned for input
@@ -102,6 +102,29 @@ function freshState(sessionId) {
     //     deny messages so the model knows which step is gating.
     current_step_tools: null,
     current_step_skill: null,
+    // ── SHI-759 / SHI-758 contract: forge_observation_enabled ──────────
+    // Per-Claude-Code-session cache of the org-admin's observation
+    // toggle (Clerk publicMetadata.forgeObservationEnabled, surfaced
+    // on the MCP side as context.org_settings.forgeObservationEnabled).
+    // Three-valued semantics:
+    //   - `null` (default) — cache miss. The stop-observer hook
+    //     proceeds with the normal FORGE OBSERVATION directive; the
+    //     MCP-side session_observer skill will read Clerk on the
+    //     first Stop in this session and the gated path will write
+    //     `false` here if the admin has disabled observation.
+    //   - `false` — admin has disabled observation for this org.
+    //     stop-observer.cjs exits silently on subsequent Stops
+    //     without invoking session_observer again (zero MCP
+    //     round-trips for the steady state).
+    //   - `true` — admin has explicitly enabled (also the implicit
+    //     default when no toggle is set). Same behavior as `null`
+    //     for the hook: normal directive on every Stop.
+    // Cache TTL is the session lifetime — no timestamp / invalidation
+    // logic on either side. Admin toggles take effect at the next
+    // Claude Code session start (which begins with a fresh state file).
+    // Field name SHARED VERBATIM with SHI-741 (Cursor stop-observer.cjs
+    // parity) — do NOT rename without coordinating both halves.
+    forge_observation_enabled: null,
   };
 }
 
