@@ -14,11 +14,18 @@
  * Execution:
  *   1. Exit if stop_hook_active (prevent infinite loop)
  *   2. Increment turn_count (tracks conversation progress)
- *   3. For linked/logged: checkpoint every CHECKPOINT_INTERVAL turns
- *      (silent audit event capturing elapsed engineering time — runs
- *      regardless of forge_observation_enabled because the gate is
- *      about the observation NUDGE, not about engineering-time
- *      tracking for already-tracked sessions).
+ *   3. For linked/logged: checkpoint when EITHER CHECKPOINT_INTERVAL turns
+ *      have passed OR TIME_FLOOR_MS of wall-clock has elapsed since the last
+ *      checkpoint — whichever comes first (FLUSH_INTERVAL turns when skill
+ *      invocations are pending). The time floor is the load-bearing part:
+ *      turns are a poor proxy for engineering time, so a pure turn count can
+ *      leave large un-banked gaps on long-turn sessions. The silent audit
+ *      event captures elapsed engineering time as a DELTA since the last
+ *      checkpoint; the dashboard SUMs deltas, so firing more often only
+ *      changes granularity, not the aggregate total. Runs regardless of
+ *      forge_observation_enabled because the gate is about the observation
+ *      NUDGE, not about engineering-time tracking for already-tracked
+ *      sessions.
  *   3b. SHI-759: exit silently if the per-session cache says the org
  *      admin has disabled observation (forge_observation_enabled =
  *      false). Steady-state zero-roundtrip — no MCP call until the
@@ -44,6 +51,24 @@
  *     starts — not by prompt-router at detection time. This means if
  *     Claude ignores a routing directive, active_workflow stays false
  *     and this hook will still fire for passive observation.
+ *   - Checkpoint baseline (last_checkpoint_at) advances when the directive is
+ *     EMITTED, not when the AI confirms the forge__update_state write. This is
+ *     deliberate: the delta is baked into the directive at emit time, so the
+ *     baseline must advance by exactly that delta to keep consecutive deltas
+ *     non-overlapping. If it only advanced on a confirmed write, a re-emit
+ *     (the time floor tripping again before a slow/ignored write lands) would
+ *     re-measure the same interval and, if both writes land, DOUBLE-COUNT —
+ *     inflating customer-facing engineering-time/ROI totals. Over-counting is
+ *     worse than under-counting, and the loss from one ignored checkpoint is
+ *     now bounded by TIME_FLOOR_MS (it was effectively unbounded before the
+ *     time floor — a single 92.8-min delta was observed in the wild).
+ *   - No end-of-session flush. The SessionEnd hook event is observability-only:
+ *     it cannot block or drive a model tool call (verified against the Claude
+ *     Code hook docs), and Codex/Cursor expose no model-driving session-end
+ *     event either — so a final checkpoint cannot be forced at exit. The
+ *     residual un-banked tail on a clean exit is therefore bounded by
+ *     TIME_FLOOR_MS (plus the final turn's duration); the time floor IS the
+ *     portable end-of-session safety net.
  *   - The reason text tells Claude to invoke forge-autopilot for tracking.
  *
  * @see plugin/hooks/prompt-router.cjs for active PDLC/epic detection
@@ -60,6 +85,16 @@ const sessionStateModule = require('./session-state.cjs');
 
 const CHECKPOINT_INTERVAL = 8; // turns between checkpoint audit events
 const FLUSH_INTERVAL = 3;      // turns between checkpoints when skill invocations are pending
+
+// Wall-clock cap between checkpoints, independent of turn cadence. Turns are a
+// poor proxy for engineering time: long research/implementation turns can run
+// ~10 min each, so a pure turn count of CHECKPOINT_INTERVAL could leave a
+// ~90-min gap (an unbroken 92.8-min delta was observed in the wild). A
+// checkpoint fires when EITHER the turn interval OR this time floor is reached,
+// so a handful of very long turns can't leave a large un-banked gap. Tunable:
+// smaller = better crash resilience / tighter granularity, larger = fewer
+// silent forced-continuation turns (lower token overhead).
+const TIME_FLOOR_MS = 10 * 60 * 1000; // 10 minutes
 
 // -- Directives ---------------------------------------------------------------
 
@@ -150,19 +185,30 @@ async function main() {
   sessionState.increment('turn_count');
   state.turn_count = (state.turn_count || 0) + 1; // keep local copy in sync
 
-  // Step 3: Linked/logged sessions — silent checkpoint every CHECKPOINT_INTERVAL turns
-  // (or FLUSH_INTERVAL if there are pending skill invocations to report)
+  // Step 3: Linked/logged sessions — silent checkpoint every CHECKPOINT_INTERVAL
+  // turns (or FLUSH_INTERVAL if there are pending skill invocations to report),
+  // OR every TIME_FLOOR_MS of wall-clock — whichever comes first.
   if (state.status === 'linked' || state.status === 'logged') {
     if (state.active_workflow) return; // Forge skills track their own time
     const turnsSinceLast = state.turn_count - (state.last_observer_turn || 0);
     // Use shorter interval when local skill invocations are pending
     const hasPendingSkills = (state.skill_invocations || []).length > (state.skills_flushed_at_turn || 0);
     const interval = hasPendingSkills ? FLUSH_INTERVAL : CHECKPOINT_INTERVAL;
-    if (turnsSinceLast < interval) return;
-    // Calculate elapsed duration since last checkpoint (or link/log moment)
+    // Elapsed duration since last checkpoint (or link/log moment). Computed
+    // BEFORE the early-return so it can gate the return alongside the turn
+    // count: fire on turn cadence OR when the wall-clock floor is exceeded.
     const lastCheckpoint = state.last_checkpoint_at || state.session_start;
     const elapsedMs = Date.now() - new Date(lastCheckpoint).getTime();
-    // Update state for next checkpoint and mark skills as flushed
+    if (turnsSinceLast < interval && elapsedMs < TIME_FLOOR_MS) return;
+    // Build the directive first. It returns '' when last_observer_conversation_id
+    // is absent (a state file predating that field). In that case emit nothing
+    // AND leave the baseline untouched, so the accumulated time is captured the
+    // moment a conversation id becomes available rather than being dropped here.
+    const directive = buildCheckpointResponse(elapsedMs, state, sessionState.stateFilePath);
+    if (!directive) return;
+    // Update state for next checkpoint and mark skills as flushed. The baseline
+    // (last_checkpoint_at) advances at emit time by design — see the
+    // "Checkpoint baseline" design principle in the file header.
     const updates = {
       last_observer_turn: state.turn_count,
       last_checkpoint_at: new Date().toISOString(),
@@ -172,7 +218,7 @@ async function main() {
     }
     sessionState.write(updates);
     // Block with silent checkpoint directive
-    process.stdout.write(buildCheckpointResponse(elapsedMs, state, sessionState.stateFilePath));
+    process.stdout.write(directive);
     return;
   }
 
