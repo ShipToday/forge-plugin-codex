@@ -80,6 +80,8 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { resolveSessionRecords, captureTokenUsageFromResolved } = require('./token-usage.cjs');
+const { activeMsFromResolved } = require('./active-time.cjs');
 
 // -- Constants ----------------------------------------------------------------
 
@@ -100,7 +102,9 @@ const TIME_FLOOR_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Build a silent checkpoint directive. Tells Claude to call forge__update_state
- * with the elapsed duration — no user interaction, no visible output.
+ * with the engineering-time delta — no user interaction, no visible output.
+ * `durationMs` is the ACTIVE time since the last checkpoint (idle excluded, see
+ * active-time.cjs) when a session log is available, else wall-clock elapsed.
  *
  * The directive embeds `last_observer_conversation_id` — the conversation
  * the observe_session run completed on. Without it the directive is not
@@ -109,7 +113,7 @@ const TIME_FLOOR_MS = 10 * 60 * 1000; // 10 minutes
  * process that never ran the observer. Returns '' when that id is absent
  * (state file predates the field) so no un-executable directive is sent.
  */
-function buildCheckpointResponse(elapsedMs, state, stateFilePath) {
+function buildCheckpointResponse(durationMs, state, stateFilePath, event, resolved) {
   const conversationId = state.last_observer_conversation_id;
   if (!conversationId) return '';
 
@@ -121,6 +125,53 @@ function buildCheckpointResponse(elapsedMs, state, stateFilePath) {
     ? `, skill_invocations: ${JSON.stringify(unreported.map(inv => inv.name))}`
     : '';
 
+  // SHI-724: piggyback per-session token capture on the SAME checkpoint
+  // directive — no new hook, no extra round-trip. The caller resolved the
+  // session log ONCE (main + sub-agent files; review #10) and the same parsed
+  // records fed the active-time delta above — here they yield the CUMULATIVE
+  // raw token components, which the orchestrator writes to a separate
+  // `event_type: token_usage` row. The snapshot is cumulative, so the read
+  // side's latest-per-session dedup makes a re-emitted or skipped checkpoint
+  // safe. Capture failures return '' worth of payload — token capture must
+  // never perturb the engineering-time checkpoint (NFR: error handling).
+  let tokenPayload = '';
+  // The Claude coding-session id, carried on the SAME directive so the read side
+  // collapses this session's snapshots across all its conversations (see
+  // audit.js). Set UNCONDITIONALLY — the checkpoint also writes a non-token
+  // observation_outcome row (the engineering-time bank) that must carry
+  // client_session_id so the Overview "Total Sessions" count keys on the coding
+  // session. The token branch below adds it to the token_usage row too; this
+  // line ensures it lands even when capture returns nothing. The workflow-guard
+  // hook can't add it here — the directive already carries this payload, so the
+  // guard's non-clobber check skips this checkpoint.
+  let clientSessionPayload = event.session_id
+    ? `, client_session_id: "${event.session_id}"`
+    : '';
+  try {
+    const tokens = captureTokenUsageFromResolved(resolved);
+    if (tokens) {
+      // SHI-724 Issue 2: emit one component bag PER model (tokens.byModel) so
+      // the orchestrator writes a per-model token_usage row — a delegated
+      // session (Opus main + Sonnet sub-agent) is then weighted per model at
+      // read. Fall back to the combined single bag if an adapter lacks byModel.
+      const models = Array.isArray(tokens.byModel) && tokens.byModel.length
+        ? tokens.byModel
+        : [tokens];
+      const tu = models.map((m) => ({
+        input: m.input,
+        cache_read: m.cacheRead,
+        cache_creation_5m: m.cacheCreation5m,
+        cache_creation_1h: m.cacheCreation1h,
+        cache_creation_flat: m.cacheCreationFlat,
+        output: m.output,
+        model_name: m.modelName,
+      }));
+      tokenPayload = `, token_usage: ${JSON.stringify(tu)}`;
+    }
+  } catch {
+    tokenPayload = '';
+  }
+
   return JSON.stringify({
     decision: 'block',
     reason:
@@ -130,9 +181,9 @@ function buildCheckpointResponse(elapsedMs, state, stateFilePath) {
       `Immediately invoke the "forge-autopilot" skill via the Skill tool with the input: ` +
       `"session checkpoint — call forge__update_state with ` +
       `conversation_id: ${conversationId}, completed_step: session_observer, ` +
-      `state_updates: { outcome: checkpoint, duration_ms: ${elapsedMs}, ` +
+      `state_updates: { outcome: checkpoint, duration_ms: ${durationMs}, ` +
       `event_type: observation_outcome, ` +
-      `work_item_key: ${state.work_item_key || 'null'}, sdlc_stage: ${state.sdlc_stage || 'other'}${skillPayload} }". ` +
+      `work_item_key: ${state.work_item_key || 'null'}, sdlc_stage: ${state.sdlc_stage || 'other'}${skillPayload}${tokenPayload}${clientSessionPayload} }". ` +
       `After calling the tool, continue normally without any additional output about this checkpoint.`,
   });
 }
@@ -198,13 +249,29 @@ async function main() {
     // BEFORE the early-return so it can gate the return alongside the turn
     // count: fire on turn cadence OR when the wall-clock floor is exceeded.
     const lastCheckpoint = state.last_checkpoint_at || state.session_start;
-    const elapsedMs = Date.now() - new Date(lastCheckpoint).getTime();
+    const lastCheckpointMs = new Date(lastCheckpoint).getTime();
+    const elapsedMs = Date.now() - lastCheckpointMs;
     if (turnsSinceLast < interval && elapsedMs < TIME_FLOOR_MS) return;
+    // R1: bank ACTIVE engineering time (idle excluded) as the checkpoint delta,
+    // not wall-clock. The firing gate ABOVE deliberately still uses wall-clock
+    // `elapsedMs` — we want periodic checkpoints on a wall-clock cadence — but
+    // the recorded duration is the active time since the last checkpoint, so a
+    // long idle gap between turns (e.g. 3h away, then one quick prompt) is not
+    // banked as engineering time. Falls back to `elapsedMs` when no session log
+    // is available (Cursor / unreadable transcript) or when the log was
+    // tail-truncated past the window start (review #8). A pure-idle window
+    // legitimately yields ~0, which sums harmlessly.
+    //
+    // The session log is resolved ONCE here and shared with the token capture
+    // inside buildCheckpointResponse (review #10 — no double read/parse).
+    const resolved = resolveSessionRecords(event);
+    const activeMs = activeMsFromResolved(resolved, lastCheckpointMs);
+    const durationMs = Number.isFinite(activeMs) ? activeMs : elapsedMs;
     // Build the directive first. It returns '' when last_observer_conversation_id
     // is absent (a state file predating that field). In that case emit nothing
     // AND leave the baseline untouched, so the accumulated time is captured the
     // moment a conversation id becomes available rather than being dropped here.
-    const directive = buildCheckpointResponse(elapsedMs, state, sessionState.stateFilePath);
+    const directive = buildCheckpointResponse(durationMs, state, sessionState.stateFilePath, event, resolved);
     if (!directive) return;
     // Update state for next checkpoint and mark skills as flushed. The baseline
     // (last_checkpoint_at) advances at emit time by design — see the

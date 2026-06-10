@@ -332,6 +332,14 @@ async function main() {
       pending_checkpoint_at: null,
       current_step_tools: null,
       current_step_skill: null,
+      // R1 anti-double-count: the workflow span was already banked — per-step
+      // duration_ms stamps for the completed steps plus the __abandoned__ row
+      // for the in-flight one. Advance the observer-checkpoint baseline past it
+      // so a logged/linked session's next checkpoint measures post-abandon
+      // activity only, instead of re-banking the whole workflow window
+      // (stop-observer suppresses checkpoints while active_workflow is true,
+      // so the baseline would otherwise still point at the pre-workflow Stop).
+      last_checkpoint_at: new Date().toISOString(),
     });
     return;
   }
@@ -350,6 +358,9 @@ async function main() {
       // not publish a Tool Permissions line — workflow-guard fails open.
       current_step_tools: toolPermissions,
       current_step_skill: currentStepSkill,
+      // R1 active-time: the first step begins now. workflow-guard reads this as
+      // the lower bound of the active-time window it stamps onto duration_ms.
+      step_active_since: new Date().toISOString(),
     };
     // Pin the observe_session conversation id separately so the periodic
     // Stop-hook checkpoint can target it after the workflow completes —
@@ -424,17 +435,39 @@ async function main() {
         pending_checkpoint_at: null,
       });
     } else if (!isWorkflowComplete(toolResponse)) {
-      // Normal step advance ("NEXT STEP") — clear any stale pin. Workflow
-      // completion is handled by the dedicated branch below which also
-      // clears the pin via active_workflow: false semantics.
+      // Normal step advance ("NEXT STEP") — clear any stale pin AND advance the
+      // R1 active-time boundary so the next step's duration_ms is measured from
+      // here. Workflow completion is handled by the dedicated branch below which
+      // also clears the pin via active_workflow: false semantics.
+      //
+      // The boundary advance is gated on the **NEXT STEP** marker so a
+      // non-advancing response cannot move it. CHECKPOINT / RE-ENTRY are handled
+      // in the branches above; the post-step confirmation-gate PAUSE renders a
+      // CHECKPOINT (so it lands in the pendingStep branch and correctly does NOT
+      // advance the boundary) — mirroring the server resetting stepStartedAt
+      // only on a true advance. Gate-continue renders a fresh NEXT STEP, so the
+      // boundary advances on confirm too.
+      //
+      // Idempotent-retry exclusion: a duplicate update_state for an already-
+      // completed step replays the CACHED advance result — same **NEXT STEP**
+      // body — with an explicit **Idempotent Retry** marker (rendered by
+      // src/tools/update-state.js). The step did NOT advance, so the boundary
+      // must not move: resetting it mid-step would silently drop the active
+      // time accrued on the in-flight step before the retry.
+      const text = responseText(toolResponse);
+      const isNextStepAdvance = /\*\*NEXT STEP\*\*/.test(text)
+        && !/\*\*Idempotent Retry\*\*/.test(text);
       const state = sessionState.read();
+      const advanceUpdates = {};
       if (state.pending_checkpoint) {
-        sessionState.write({
-          pending_checkpoint: false,
-          pending_checkpoint_step: null,
-          pending_checkpoint_at: null,
-        });
+        advanceUpdates.pending_checkpoint = false;
+        advanceUpdates.pending_checkpoint_step = null;
+        advanceUpdates.pending_checkpoint_at = null;
       }
+      if (isNextStepAdvance) {
+        advanceUpdates.step_active_since = new Date().toISOString();
+      }
+      if (Object.keys(advanceUpdates).length) sessionState.write(advanceUpdates);
     }
 
     // Per-step tool-permission allowlist refresh (V2 enforcement). Each
@@ -470,6 +503,18 @@ async function main() {
       pending_checkpoint_at: null,
       current_step_tools: null,
       current_step_skill: null,
+      // R1 anti-double-count: the workflow span was already banked per-step
+      // via the guard's duration_ms stamps. Advance the observer-checkpoint
+      // baseline past it so a logged/linked session's next checkpoint measures
+      // post-workflow activity only — without this, the first post-workflow
+      // checkpoint window spans the entire workflow (stop-observer suppresses
+      // checkpoints while active_workflow is true and nothing else moves the
+      // baseline), re-banking the same active time on the observer conversation
+      // and double-counting it in the dashboard's SUM(duration_ms). The small
+      // pre-workflow tail (activity between the last checkpoint and workflow
+      // start) is dropped with it — bounded by TIME_FLOOR_MS, and under-count
+      // is the accepted failure direction.
+      last_checkpoint_at: new Date().toISOString(),
     });
     return;
   }
