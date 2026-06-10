@@ -102,6 +102,15 @@ function freshState(sessionId) {
     //     deny messages so the model knows which step is gating.
     current_step_tools: null,
     current_step_skill: null,
+    // ── R1 active-time: step_active_since ───────────────────────────────
+    // ISO timestamp marking when the CURRENT workflow step began (the
+    // client-side analog of the server's `stepStartedAt`). Set by
+    // workflow-tracker.cjs on workflow start and on every genuine NEXT STEP
+    // advance; NOT advanced on relayed-question CHECKPOINT/RE-ENTRY (the step
+    // does not advance there). workflow-guard.cjs reads it as the lower bound
+    // of the active-time window it stamps onto forge__update_state's
+    // duration_ms. null until the first step begins.
+    step_active_since: null,
     // ── SHI-759 / SHI-758 contract: forge_observation_enabled ──────────
     // Per-Claude-Code-session cache of the org-admin's observation
     // toggle (Clerk publicMetadata.forgeObservationEnabled, surfaced

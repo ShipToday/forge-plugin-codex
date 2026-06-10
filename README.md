@@ -62,6 +62,17 @@ Plugin hooks are disabled by default — enable them in `~/.codex/config.toml`:
 plugin_hooks = true
 ```
 
+### Token usage capture
+
+Forge captures per-session token usage from the local Codex rollout log
+(`~/.codex/sessions/…/rollout-*.jsonl`) and delivers it on Forge's own
+`forge__update_state` calls via a `PreToolUse` input rewrite
+(`hookSpecificOutput.updatedInput`). Codex honors these rewrites from
+**rust-v0.131.0** — on older versions the plugin detects this (a cached
+`codex --version` probe, refreshed daily) and skips the rewrite instead of
+triggering per-call hook errors; capture then degrades to the best-effort
+checkpoint relay. Upgrade to Codex ≥ 0.131.0 for reliable capture.
+
 ## License
 
 MIT - see `LICENSE`.
