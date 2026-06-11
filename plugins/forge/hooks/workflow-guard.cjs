@@ -50,10 +50,12 @@
  * Codex honors `updatedInput` rewrites from rust-v0.131.0 (PR #20527) — and
  * unlike Claude Code < 2.0.10, OLDER Codex builds do NOT silently ignore the
  * field: they log a hook-failed error and run the original call. Both
- * rewrite sites below are therefore gated by codexSupportsUpdatedInput(), a
- * cached `codex --version` probe. All other logic is identical to the
- * Claude Code source — keep it that way on every plugin sync
- * (/shiptoday-plugin).
+ * rewrite sites below are therefore gated by codexSupportsUpdatedInput(event),
+ * which reads the RUNNING session's version from the rollout `session_meta`
+ * (Codex Desktop can run a newer build than the `codex` binary on PATH), and
+ * only falls back to a cached `codex --version` probe when no rollout version
+ * is resolvable. All other logic is identical to the Claude Code source —
+ * keep it that way on every plugin sync (/shiptoday-plugin).
  *
  * @see plugin/hooks/token-usage.cjs for the transcript-parsing capture adapters
  * @see plugin/hooks/workflow-tracker.cjs for the state writes this hook reads
@@ -64,7 +66,7 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
-const { resolveSessionRecords, captureTokenUsageFromResolved } = require('./token-usage.cjs');
+const { resolveSessionRecords, captureTokenUsageFromResolved, resolveCodexRolloutPath } = require('./token-usage.cjs');
 const { activeMsFromEvent, activeMsFromResolved } = require('./active-time.cjs');
 const fs = require('fs');
 const path = require('path');
@@ -74,21 +76,88 @@ const { execFileSync } = require('child_process');
 // -- Codex updatedInput version gate -----------------------------------------
 // Codex supports PreToolUse `hookSpecificOutput.updatedInput` rewrites from
 // rust-v0.131.0. Older builds treat the payload as a hook failure — a noisy
-// per-call error — so the stamp sites below bail out unless the installed
-// Codex clears the floor. The hook stdin carries no version field, so the
-// verdict comes from a `codex --version` probe cached on disk for 24h:
-// PreToolUse fires on every tool call and a per-call spawn is unacceptable.
-// Probe failure caches `false` (quiet no-capture) — fail toward silence,
-// never toward per-call hook errors; an upgrade is picked up at the next
-// cache expiry. With the rewrite gated off, token capture degrades to the
-// best-effort Stop-hook checkpoint relay (stop-observer.cjs), which works on
-// every Codex version.
+// per-call error — so the stamp sites below bail out unless the running Codex
+// clears the floor. The verdict has TWO sources, in priority order:
+//
+//   1. The RUNNING session's version, read from the rollout's `session_meta`
+//      record (`payload.cli_version`). This is authoritative: it is the build
+//      that will actually honor or reject `updatedInput`. It is required
+//      because Codex Desktop can run a NEWER build (e.g. 0.138.0-alpha.7) than
+//      the `codex` binary on PATH (e.g. 0.130.0) — probing PATH alone makes a
+//      Desktop session that DOES support the rewrite look unsupported, so
+//      token capture is silently skipped (the bug this gate originally had).
+//   2. Fallback: a `codex --version` probe of the PATH binary, cached on disk
+//      for 24h (PreToolUse fires on every tool call; a per-call process spawn
+//      is unacceptable). Only consulted when no rollout version is resolvable.
+//
+// The rollout version is checked FIRST and returned immediately, so a cached
+// PATH-CLI `false` can never override a newer running session. Reading the
+// rollout's first line is far cheaper than a process spawn, so it is not
+// cached. Probe failure caches `false` (quiet no-capture) — fail toward
+// silence, never toward per-call hook errors. With the rewrite gated off,
+// token capture degrades to the best-effort Stop-hook checkpoint relay
+// (stop-observer.cjs), which works on every Codex version.
 
 const CODEX_UPDATED_INPUT_FLOOR = [0, 131, 0]; // rust-v0.131.0 (2026-05-18)
 const CODEX_VERSION_CACHE = path.join(os.tmpdir(), 'forge-observer', 'codex-version.json');
 const CODEX_VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+// Bounded prefix read of the rollout's first line. The `session_meta` record
+// can be large (it embeds the full base instructions), but `cli_version`
+// appears early in its payload — well within this prefix — so we regex the
+// prefix instead of JSON-parsing a multi-KB line.
+const ROLLOUT_HEAD_BYTES = 16 * 1024;
 
-function codexSupportsUpdatedInput() {
+/**
+ * Parse the first `X.Y.Z` triple from a version string, ignoring any
+ * pre-release suffix (e.g. "0.138.0-alpha.7" → [0,138,0]). null when absent.
+ */
+function parseVersionTriple(str) {
+  const m = String(str == null ? '' : str).match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** Does a [major,minor,patch] triple meet the updatedInput support floor? */
+function meetsUpdatedInputFloor(v) {
+  const f = CODEX_UPDATED_INPUT_FLOOR;
+  return v[0] !== f[0] ? v[0] > f[0] : v[1] !== f[1] ? v[1] > f[1] : v[2] >= f[2];
+}
+
+/**
+ * The RUNNING Codex session's version, from the rollout `session_meta` record.
+ * Returns a [major,minor,patch] triple, or null when no rollout/version is
+ * resolvable (older rollout format, no path, unreadable file). Reads only a
+ * bounded prefix of the first line so a large session_meta never costs much.
+ */
+function rolloutVersionTriple(event) {
+  try {
+    const rollout = resolveCodexRolloutPath(event);
+    if (!rollout) return null;
+    const fd = fs.openSync(rollout, 'r');
+    let head;
+    try {
+      const buf = Buffer.allocUnsafe(ROLLOUT_HEAD_BYTES);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      head = buf.toString('utf8', 0, n);
+    } finally {
+      fs.closeSync(fd);
+    }
+    // First record is `session_meta`; its payload carries `cli_version`. Match
+    // the first occurrence (it precedes the bulky base_instructions text).
+    if (!/"type"\s*:\s*"session_meta"/.test(head)) return null;
+    const m = head.match(/"cli_version"\s*:\s*"([^"]+)"/);
+    return m ? parseVersionTriple(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexSupportsUpdatedInput(event) {
+  // 1. Authoritative: the running session's version (rollout session_meta).
+  //    Checked first so a stale PATH-CLI cache can never override it.
+  const running = rolloutVersionTriple(event);
+  if (running) return meetsUpdatedInputFloor(running);
+
+  // 2. Fallback: cached PATH `codex --version` probe.
   try {
     const cached = JSON.parse(fs.readFileSync(CODEX_VERSION_CACHE, 'utf8'));
     if (cached && typeof cached.supported === 'boolean'
@@ -109,12 +178,10 @@ function codexSupportsUpdatedInput() {
       shell: process.platform === 'win32',
       stdio: ['ignore', 'pipe', 'ignore'],
     }));
-    const m = out.match(/(\d+)\.(\d+)\.(\d+)/);
-    if (m) {
-      version = `${m[1]}.${m[2]}.${m[3]}`;
-      const v = [Number(m[1]), Number(m[2]), Number(m[3])];
-      const f = CODEX_UPDATED_INPUT_FLOOR;
-      supported = v[0] !== f[0] ? v[0] > f[0] : v[1] !== f[1] ? v[1] > f[1] : v[2] >= f[2];
+    const v = parseVersionTriple(out);
+    if (v) {
+      version = v.join('.');
+      supported = meetsUpdatedInputFloor(v);
     }
   } catch {
     supported = false; // probe failed (codex not on PATH / timeout)
@@ -123,7 +190,7 @@ function codexSupportsUpdatedInput() {
     fs.mkdirSync(path.dirname(CODEX_VERSION_CACHE), { recursive: true });
     fs.writeFileSync(
       CODEX_VERSION_CACHE,
-      JSON.stringify({ supported, version, probed_at: Date.now() }),
+      JSON.stringify({ supported, version, source: 'path-cli', probed_at: Date.now() }),
       'utf8'
     );
   } catch {
@@ -362,7 +429,7 @@ async function main() {
     // honors from rust-v0.131.0 — bail BEFORE any capture work (rollout
     // parsing is wasted when the rewrite can't be delivered). See the gate's
     // comment block above.
-    if (!codexSupportsUpdatedInput()) return;
+    if (!codexSupportsUpdatedInput(event)) return;
     try {
       let toolInput = event.tool_input || {};
       if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);
@@ -460,7 +527,7 @@ async function main() {
   // a null capture (Cursor / unreadable transcript) leaves the call unchanged
   // so the server keeps its wall-clock fallback.
   if (bare === 'forge__abandon_workflow' && state.active_workflow && state.step_active_since) {
-    if (!codexSupportsUpdatedInput()) return; // version-gated — see gate above
+    if (!codexSupportsUpdatedInput(event)) return; // version-gated — see gate above
     try {
       let toolInput = event.tool_input || {};
       if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);

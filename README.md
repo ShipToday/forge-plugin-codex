@@ -68,8 +68,11 @@ Forge captures per-session token usage from the local Codex rollout log
 (`~/.codex/sessions/…/rollout-*.jsonl`) and delivers it on Forge's own
 `forge__update_state` calls via a `PreToolUse` input rewrite
 (`hookSpecificOutput.updatedInput`). Codex honors these rewrites from
-**rust-v0.131.0** — on older versions the plugin detects this (a cached
-`codex --version` probe, refreshed daily) and skips the rewrite instead of
+**rust-v0.131.0**. To decide whether the rewrite is safe, the plugin reads the
+**running session's** version from the rollout's `session_meta` record — so a
+Codex Desktop build newer than the `codex` binary on your `PATH` is detected
+correctly — and only falls back to a cached `codex --version` probe when no
+rollout version is available. On older versions it skips the rewrite instead of
 triggering per-call hook errors; capture then degrades to the best-effort
 checkpoint relay. Upgrade to Codex ≥ 0.131.0 for reliable capture.
 
