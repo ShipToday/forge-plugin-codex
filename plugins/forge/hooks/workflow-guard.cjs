@@ -210,6 +210,13 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'forge__abandon_workflow',
   'forge__start_workflow',
   'forge__get_workflow_state', // Read-only recovery channel; safe to call mid-CHECKPOINT
+  // Feedback delivery (SHI-771/SHI-807) — the in-workflow session_feedback step
+  // and the bundled forge-feedback skill instruct the model to call this. It is a
+  // Forge-owned tool that posts feedback to ShipToday (no user-domain mutation),
+  // so it must never be blocked by a CHECKPOINT or a step's category allowlist.
+  // Without this it was only permitted by the unknown-tool fail-open path, which
+  // breaks the moment it's called mid-checkpoint or a category pattern matches it.
+  'forge__send_feedback',
   // Question relay — the only way for the model to talk to the user mid-step
   'AskUserQuestion',
   // Claude Code primitives — read-only or local-only, cannot mutate external state
