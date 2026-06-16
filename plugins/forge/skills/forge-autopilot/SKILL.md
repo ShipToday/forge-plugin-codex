@@ -393,7 +393,10 @@ findings first, every time.
 
 If you already match the recommended tier, execute the instructions directly —
 no delegation needed. If you do NOT match, delegate or switch using the
-environment-specific guidance Forge returned.
+environment-specific guidance Forge returned — unless the step's **Worth-it
+check** flags the remaining work as a pre-computed replay (content already in
+workflow state, no new generation), in which case run it inline regardless of
+tier.
 
 ### Rules
 
@@ -405,8 +408,14 @@ environment-specific guidance Forge returned.
    (e.g., "Delegating to a balanced model for this step...")
 4. **Pass the full prompt** — everything below `---DELEGATE BELOW---` in the
    instructions is the delegated prompt. Include all of it
-5. **Do NOT skip delegation** — direct execution is easier but costs 10-20x
-   more on low-complexity tasks. The cost difference is real
+5. **Delegate when it pays for itself, not reflexively** — for real work
+   that's off your tier, delegating up buys better reasoning and down saves
+   real cost. But each step's advisory carries a **Worth-it check**: when the
+   remaining work is only replaying content already in workflow state (a
+   pre-computed `pending_*` post, no new generation), run it inline on your
+   current model — spawning a sub-agent for that just burns a round-trip.
+   Follow the per-step Worth-it check; don't skip delegation merely because
+   direct execution is easier
 
 ## Step 5: Coexist with planning/dry-run modes
 
