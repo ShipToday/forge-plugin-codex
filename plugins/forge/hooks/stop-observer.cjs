@@ -301,8 +301,9 @@ async function main() {
   // session_observer — saving one MCP round-trip per turn for the
   // steady state. Strict `=== false` so cache misses (null /
   // undefined / true / non-boolean) fall through to the normal
-  // directive, preserving the opt-out semantics that match the
-  // dashboard's default-true contract.
+  // directive — the hook never pre-suppresses: it fires once and lets the
+  // server-side gate make the authoritative opt-in decision (the org default
+  // is now `false`, resolved in src/services/org-settings.js).
   //
   // Placed AFTER the linked/logged checkpoint branch so that
   // engineering-time tracking on already-tracked sessions continues

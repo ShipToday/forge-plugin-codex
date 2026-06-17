@@ -300,8 +300,14 @@ async function main() {
       try { toolInput = JSON.parse(toolInput); } catch { toolInput = {}; }
     }
     const skillName = toolInput.skill || null;
-    // Ignore forge-autopilot — that's our own routing skill, not a local skill
-    if (skillName && skillName !== 'forge-autopilot') {
+    // Ignore forge-autopilot — that's our own routing skill, not a local skill.
+    // The skill id can arrive namespaced: Claude Code surfaces plugin skills as
+    // "forge-shiptoday:forge-autopilot", so a bare `=== 'forge-autopilot'` check
+    // misses it and records our own router into skill_invocations — which then
+    // pollutes the local-skill audit flush. Compare the bare id after any
+    // "plugin:" prefix so both the bare and namespaced forms are ignored.
+    const bareSkillName = skillName ? skillName.split(':').pop() : null;
+    if (skillName && bareSkillName !== 'forge-autopilot') {
       const state = sessionState.read();
       const invocations = state.skill_invocations || [];
       invocations.push({ name: skillName, at: new Date().toISOString() });
@@ -371,6 +377,32 @@ async function main() {
       updates.last_observer_conversation_id = conversationId;
     }
     sessionState.write(updates);
+    return;
+  }
+
+  // Workflow preflight: forge__start_workflow returned WITHOUT a Conversation
+  // ID. It did not start a workflow — it returned a clarification prompt
+  // (disambiguation, team selection, key confirmation, name resolution,
+  // recommendation, or intent classification) or a disabled/error response.
+  // No workflow is in flight, but the user is mid-negotiation with Forge and is
+  // about to answer a question, so suppress the passive observer for this Stop:
+  // otherwise stop-observer.cjs sees an untracked session and stacks its tracking
+  // nudge on top of the clarification prompt the user is still answering.
+  //
+  // `**Conversation ID**` is rendered ONLY on a real start
+  // (src/tools/start-workflow.js), so its ABSENCE is the robust preflight signal
+  // across every current and future preflight type — no per-prompt text matching
+  // to keep in sync as prompts are reworded or added.
+  //
+  // observer_blocked (NOT observer_fired): prompt-router.cjs re-arms the observer
+  // on a later turn while !observer_fired, so if the user abandons the preflight
+  // and drifts into other untracked work the observer still fires for it. When
+  // the user answers and the real workflow starts, the branch above sets
+  // active_workflow, which keeps the observer suppressed for the workflow's own
+  // duration. A hard start error lands here too and is benign — the re-arm clears
+  // the block on the next turn.
+  if (isWorkflowStart) {
+    sessionState.write({ observer_blocked: true });
     return;
   }
 
