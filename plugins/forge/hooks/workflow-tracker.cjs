@@ -203,10 +203,19 @@ const OUTCOME_TO_STATUS = {
 
 /**
  * Extract observer event metadata from a forge__update_state tool input.
- * Returns `{ status, outcome }` if this is a recognised observation_outcome
- * event, or null otherwise. `status` is the mapped local session status;
- * `outcome` is the raw outcome string the caller can branch on for
- * outcome-specific side effects (e.g. the SHI-759 cache-flag pin).
+ * Returns `{ status, outcome, sdlcStage }` for a recognised
+ * observation_outcome event, or null otherwise. `status` is the mapped local
+ * session status (null for stage-carrying outcomes like linked/created that
+ * have no status mapping); `outcome` is the raw outcome string the caller can
+ * branch on for outcome-specific side effects (e.g. the SHI-759 cache-flag
+ * pin); `sdlcStage` is the observer's classified stage, persisted so
+ * stop-observer.cjs periodic checkpoints (which read `state.sdlc_stage`,
+ * defaulting to 'other') bank engineering time under the real stage.
+ *
+ * Periodic engineering-time checkpoints reuse `observation_outcome` but must
+ * NOT touch status or re-stamp the stage — they carry the already-persisted
+ * stage (or its 'other' fallback), so re-capturing would risk clobbering a
+ * good value with the default. They are skipped here.
  */
 function extractObserverEvent(event) {
   let input = event.tool_input || {};
@@ -215,9 +224,14 @@ function extractObserverEvent(event) {
   }
   const updates = input.state_updates;
   if (!updates || updates.event_type !== 'observation_outcome') return null;
+  if (updates.outcome === 'checkpoint') return null;
   const status = OUTCOME_TO_STATUS[updates.outcome] || null;
-  if (!status) return null;
-  return { status, outcome: updates.outcome };
+  const sdlcStage = typeof updates.sdlc_stage === 'string' && updates.sdlc_stage
+    ? updates.sdlc_stage
+    : null;
+  // Nothing actionable unless the event maps to a status or carries a stage.
+  if (!status && !sdlcStage) return null;
+  return { status, outcome: updates.outcome, sdlcStage };
 }
 
 /**
@@ -432,14 +446,26 @@ async function main() {
 
     const observerEvent = extractObserverEvent(event);
     if (observerEvent) {
-      const { status: observerStatus } = observerEvent;
-      const statusUpdates = {
-        status: observerStatus,
-        last_checkpoint_at: new Date().toISOString(),
-      };
-      // For dismissed/no_observation, also block re-observation
-      if (observerStatus === 'dismissed') {
-        statusUpdates.observer_blocked = true;
+      const { status: observerStatus, sdlcStage } = observerEvent;
+      const statusUpdates = {};
+      // Status-carrying outcomes (ad_hoc → logged, snoozed, dismissed) set the
+      // tracking status and advance the checkpoint baseline. Stage-only
+      // outcomes (linked/created) carry no status mapping — they persist the
+      // stage without disturbing status or the baseline.
+      if (observerStatus) {
+        statusUpdates.status = observerStatus;
+        statusUpdates.last_checkpoint_at = new Date().toISOString();
+        // For dismissed, also block re-observation
+        if (observerStatus === 'dismissed') {
+          statusUpdates.observer_blocked = true;
+        }
+      }
+      // Persist the observer's classified SDLC stage so stop-observer.cjs
+      // periodic checkpoints bank engineering time under the real stage
+      // instead of defaulting to 'other'. Previously `state.sdlc_stage` was
+      // never written, so every checkpoint heartbeat fell back to 'other'.
+      if (sdlcStage) {
+        statusUpdates.sdlc_stage = sdlcStage;
       }
       sessionState.write(statusUpdates);
       // Don't return — still check for workflow completion below
