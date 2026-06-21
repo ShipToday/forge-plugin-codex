@@ -209,6 +209,35 @@ function buildBlockResponse(stateFilePath) {
   });
 }
 
+/**
+ * SHI-787: continuation directive for the required-skill stall.
+ *
+ * Fired when a Forge workflow step is mid-flight, the model invoked a local
+ * skill (e.g. a required security-review whose prompt says "reply with only
+ * its output"), and then ended its turn WITHOUT calling forge__update_state.
+ * Blocks the stop and tells the model that a skill's "nothing else"
+ * instruction governs the skill's OUTPUT FORMAT — not the turn boundary — and
+ * that forge__update_state is mandatory before the turn may end. Fires at most
+ * once per stall (event.stop_hook_active guards a second block), so it can
+ * never loop. Concise on purpose — some clients surface the block reason to
+ * the user verbatim.
+ */
+function buildSkillContinuationResponse(state) {
+  const convo = state.conversation_id || '<conversation_id>';
+  const step = state.current_step_skill || state.current_skill || 'the current step';
+  return JSON.stringify({
+    decision: 'block',
+    reason:
+      `FORGE WORKFLOW — do not stop yet. A local skill ran while the Forge step "${step}" is ` +
+      `still in progress, and the turn ended WITHOUT calling forge__update_state. A skill ` +
+      `instruction like "reply with only your output / nothing else" governs that skill's ` +
+      `OUTPUT FORMAT only — it does NOT end the workflow step. Briefly relay the skill's key ` +
+      `findings, then call forge__update_state (conversation_id: ${convo}, completed_step: ` +
+      `${step}, …) to complete the step. Calling forge__update_state is mandatory before this ` +
+      `turn may end.`,
+  });
+}
+
 // -- Main --------------------------------------------------------------------
 
 async function main() {
@@ -231,6 +260,23 @@ async function main() {
   // Read session state — scoped to this Claude Code session.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
+
+  // Step 1b (SHI-787): required-skill continuation backstop.
+  // A workflow is active and the model invoked a local skill mid-step (e.g. a
+  // required security-review), then ended its turn WITHOUT calling
+  // forge__update_state — and we are NOT at a relayed-question / confirmation
+  // checkpoint (those are legitimate pauses for user input). The step stalled.
+  // Block ONCE and direct the model to relay the findings and call
+  // forge__update_state. event.stop_hook_active (checked above) guarantees a
+  // second consecutive stop is NOT re-blocked, so this can never loop: one
+  // nudge, then if the model still stops the workflow simply pauses and the
+  // user can resume by saying "continue". Disarm the flag so the single nudge
+  // is not repeated for the same stall.
+  if (state.active_workflow && state.pending_skill_continuation && !state.pending_checkpoint) {
+    sessionState.write({ pending_skill_continuation: false });
+    process.stdout.write(buildSkillContinuationResponse(state));
+    return;
+  }
 
   // Step 2: Increment turn count (but not for forced continuations)
   sessionState.increment('turn_count');
