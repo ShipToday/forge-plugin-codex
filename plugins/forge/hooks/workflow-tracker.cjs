@@ -325,7 +325,16 @@ async function main() {
       const state = sessionState.read();
       const invocations = state.skill_invocations || [];
       invocations.push({ name: skillName, at: new Date().toISOString() });
-      sessionState.write({ skill_invocations: invocations });
+      const updates = { skill_invocations: invocations };
+      // SHI-787: arm the required-skill continuation backstop. If a Forge
+      // workflow step is mid-flight when a local skill runs, the model is
+      // expected to relay the skill's findings and call forge__update_state in
+      // the same turn. A skill prompt like "reply with only your output" can
+      // make the model stop instead; the Stop hook (stop-observer.cjs) fires a
+      // one-time continuation nudge when this flag is still set at turn end.
+      // Cleared by any forge__update_state below.
+      if (state.active_workflow) updates.pending_skill_continuation = true;
+      sessionState.write(updates);
     }
     return;
   }
@@ -425,6 +434,11 @@ async function main() {
   // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
+    // SHI-787: any forge__update_state means the model is driving the workflow
+    // forward (advance, checkpoint, re-entry, or completion) — disarm the
+    // required-skill continuation backstop so the Stop hook does not nudge.
+    sessionState.write({ pending_skill_continuation: false });
+
     // Org-disabled gate backstop (SHI-758/759). The session_observer gated
     // completion tells the AI parent to write forge_observation_enabled: false
     // into the per-session state file, but the parent "consistently forgets
