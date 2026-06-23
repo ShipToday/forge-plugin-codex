@@ -533,23 +533,42 @@ async function main() {
   // guards as the update_state stamp: never clobber a caller-set value, and
   // a null capture (Cursor / unreadable transcript) leaves the call unchanged
   // so the server keeps its wall-clock fallback.
-  if (bare === 'forge__abandon_workflow' && state.active_workflow && state.step_active_since) {
+  if (bare === 'forge__abandon_workflow') {
     if (!codexSupportsUpdatedInput(event)) return; // version-gated — see gate above
     try {
       let toolInput = event.tool_input || {};
       if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);
-      if (toolInput.duration_ms == null) {
+      const updated = { ...toolInput };
+      let changed = false;
+      // SHI-378 follow-up: stamp the Claude coding-session id so the synthetic
+      // `__abandoned__` audit row joins the rest of its coding session. Without
+      // it the row writes client_session_id = NULL and fragments off its own
+      // session under COALESCE(client_session_id, session_id) — orphaning its
+      // time on the Token Intelligence drilldown. Always stamp it (not gated on
+      // active_workflow): event.session_id is the only reliable source and the
+      // stamp is harmless. Don't clobber a caller-set value.
+      if (updated.client_session_id == null && event.session_id) {
+        updated.client_session_id = event.session_id;
+        changed = true;
+      }
+      // R1 active-time (idle-excluded) for the in-flight step — only meaningful
+      // while a step is active. Same guards as the update_state stamp.
+      if (updated.duration_ms == null && state.active_workflow && state.step_active_since) {
         const activeMs = activeMsFromEvent(event, Date.parse(state.step_active_since));
         if (Number.isFinite(activeMs)) {
-          process.stdout.write(JSON.stringify({
-            hookSpecificOutput: {
-              hookEventName: 'PreToolUse',
-              permissionDecision: 'allow',
-              updatedInput: { ...toolInput, duration_ms: activeMs },
-            },
-          }));
-          return;
+          updated.duration_ms = activeMs;
+          changed = true;
         }
+      }
+      if (changed) {
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            updatedInput: updated,
+          },
+        }));
+        return;
       }
     } catch {
       // Fall through — allow the call unchanged.
