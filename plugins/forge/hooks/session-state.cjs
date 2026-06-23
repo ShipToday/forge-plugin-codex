@@ -111,7 +111,7 @@ function freshState(sessionId) {
     // of the active-time window it stamps onto forge__update_state's
     // duration_ms. null until the first step begins.
     step_active_since: null,
-    // ── SHI-759 / SHI-758 contract: forge_observation_enabled ──────────
+    // ── forge_observation_enabled ──────────────────────────────────────
     // Per-Claude-Code-session cache of the org-admin's observation
     // toggle (Clerk publicMetadata.forgeObservationEnabled, surfaced
     // on the MCP side as context.org_settings.forgeObservationEnabled).
@@ -131,8 +131,8 @@ function freshState(sessionId) {
     // Cache TTL is the session lifetime — no timestamp / invalidation
     // logic on either side. Admin toggles take effect at the next
     // Claude Code session start (which begins with a fresh state file).
-    // Field name SHARED VERBATIM with SHI-741 (Cursor stop-observer.cjs
-    // parity) — do NOT rename without coordinating both halves.
+    // Field name shared verbatim with the Cursor stop-observer.cjs
+    // parity — do NOT rename without coordinating both halves.
     forge_observation_enabled: null,
   };
 }

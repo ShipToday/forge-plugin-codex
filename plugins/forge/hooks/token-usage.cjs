@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * token-usage.cjs — SHI-724 / SHI-378
+ * token-usage.cjs
  *
  * Per-tool token capture adapters behind one interface. Called from the
  * Stop/SubagentStop hook (stop-observer.cjs) to extract a session's raw,
@@ -11,7 +11,7 @@
  * Design (architecture decision #3/#4):
  *   - **Raw components only** — input / cache_read / cache_creation (TTL-split
  *     5m+1h) / output + model_name. Never a pre-weighted number; weighting is
- *     applied at read (src/services/token-weighting.js).
+ *     applied at read on the server.
  *   - **Per-tool adapters** — Claude Code reads `transcript_path` + per-turn
  *     `message.usage` (+ `subagents/agent-*.jsonl`); Codex reads its
  *     `rollout-*.jsonl`; Cursor exposes no token usage today → null.
@@ -111,12 +111,12 @@ function accumulateClaudeUsage(records, acc) {
 }
 
 /**
- * SHI-724 per-model attribution: bucket deduped request groups into a
+ * Per-model attribution: bucket deduped request groups into a
  * `Map<model_name, acc>` so a delegated session (e.g. Opus main agent +
  * Sonnet sub-agent) is attributed PER model rather than collapsing to one
  * `model_name`. Each request's tokens belong wholly to its own model; the
  * orchestrator later writes one token_usage row per model so the read side
- * can weight each slice with its own price profile (SHI-763).
+ * can weight each slice with its own price profile.
  */
 function accumulateClaudeUsageByModel(records, byModelMap) {
   for (const g of groupByRequest(records).values()) {
@@ -218,7 +218,7 @@ function readJsonl(filePath) {
  *              (a directory BESIDE the main <session-id>.jsonl, named after
  *               the session — i.e. transcriptPath with `.jsonl` stripped)
  * The old single-path lookup (legacy only) silently dropped ALL delegated/
- * sub-agent records (SHI-724 multi-model gap). Probe the nested layout first,
+ * sub-agent records (the multi-model gap). Probe the nested layout first,
  * then the legacy sibling, and use the FIRST that exists so a session's
  * sub-agent files are never read twice.
  *
@@ -270,7 +270,7 @@ function captureClaudeFromRecords(records) {
   const acc = freshAcc();
   const byModelMap = new Map();
   accumulateClaudeUsage(records, acc);                 // combined (back-compat fields)
-  accumulateClaudeUsageByModel(records, byModelMap);   // SHI-724 per-model attribution
+  accumulateClaudeUsageByModel(records, byModelMap);   // per-model attribution
   const result = finalize(acc);
   if (result) result.byModel = byModelList(byModelMap);
   return result;

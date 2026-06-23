@@ -87,10 +87,10 @@ Do NOT pass an explicit `workflow` parameter and do NOT try to pre-route to
 a specific skill. Forge handles all routing on the server:
 
 - **Unambiguous verbs + epic key** (e.g. "generate PRD for PROJ-123",
-  "review the PR for SHI-512", "tech handoff for BUG-42") are matched
+  "review the PR for PROJ-512", "tech handoff for BUG-42") are matched
   server-side against a configured set of hot-path verbs and routed
   directly to the right skill in a single round-trip.
-- **Workflow-shaped requests** (e.g. "do a security review", "is SHI-615
+- **Workflow-shaped requests** (e.g. "do a security review", "is PROJ-615
   ready to ship", "plan the test strategy") are classified server-side
   against the full workflow catalog (Forge defaults plus any org-specific
   customer workflows) and routed to the matching workflow.
@@ -142,7 +142,7 @@ forge__start_workflow(
 )
 ```
 
-The four-field structured shape (SHI-666) keeps the bound work item key
+The four-field structured shape keeps the bound work item key
 clean: `epic_key` is passed as a structured parameter so any
 `SHI-NNN`-shaped strings inside `pre_forge_context` cannot hijack the
 binding via the embedded-key regex.
