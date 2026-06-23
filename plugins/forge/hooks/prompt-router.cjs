@@ -10,14 +10,14 @@
  *
  * The hook fires for two things the LLM cannot reliably decide on its own:
  *
- *   1. **Epic key references** (e.g. "explore architecture of SHI-615").
+ *   1. **Epic key references** (e.g. "explore architecture of PROJ-615").
  *      Skill discovery is a soft signal and Claude can choose to bypass
  *      Forge when it has alternative tools (Linear MCP, Read, Grep) that
  *      look usable. A regex match on a tracked work item id is a strong
  *      structural signal and gets an ADVISORY routing directive — a hint
  *      that surfaces the key and recommends Forge, but yields agency to
- *      Claude when the conversation context warrants a different route
- *      (SHI-678). The regex is purely structural — it knows nothing
+ *      Claude when the conversation context warrants a different route.
+ *      The regex is purely structural — it knows nothing
  *      about workflows or skills, so adding new ones requires no changes
  *      here.
  *
@@ -35,7 +35,6 @@
  * @see plugin/hooks/session-state.cjs for state management
  * @see plugin/hooks/stop-observer.cjs for passive observation
  * @see plugin/skills/forge-autopilot/SKILL.md for routing logic
- * @see src/skills/intake/session-observer.js for the Forge MCP skill
  */
 
 'use strict';
@@ -44,7 +43,7 @@ const sessionStateModule = require('./session-state.cjs');
 
 // -- Detection patterns ------------------------------------------------------
 
-// Tracked work item key pattern (e.g. SHI-448, PROJ-123, BUG-42). Purely
+// Tracked work item key pattern (e.g. PROJ-123, BUG-42). Purely
 // structural — no vocabulary, no workflow knowledge. Matches any sequence
 // "<UPPERCASE letters>-<digits>" anywhere in the prompt.
 const EPIC_KEY_RE = /\b[A-Z][A-Z0-9]+-\d+\b/;
@@ -63,7 +62,7 @@ function emitWakeConditionCheck(wakeCondition) {
 }
 
 function emitEpicKeyRouting(key) {
-  // SHI-678: advisory tone (was forced "MUST invoke"). The orchestrator
+  // Advisory tone (was forced "MUST invoke"). The orchestrator
   // now handles cited-reference disambiguation via `needsKeyConfirmation`,
   // so the hook no longer needs to force the routing path. The hint
   // remains because it's the structural signal that nudges Claude away

@@ -28,14 +28,14 @@
  *     tools (custom MCP connectors, future built-ins) should not be blocked
  *     by a closed-world allowlist.
  *
- * Token stamping (SHI-724): for forge__update_state in any TRACKED session
+ * Token stamping: for forge__update_state in any TRACKED session
  * (an active workflow, or a logged/linked observer session) this hook ALSO
  * rewrites the tool input via `updatedInput`, stamping a cumulative token
  * snapshot onto state_updates.token_usage. This is the client-side analog of
  * the server-side duration_ms stamp — the Forge server makes no Anthropic
  * calls so it cannot measure token usage, and a PreToolUse rewrite lands the
  * tokens on the SAME call that already records duration. The orchestrator
- * persists them as a separate token_usage row (src/orchestrator.js). It
+ * persists them as a separate token_usage row (on the server). It
  * replaces the fragile legacy path where the model had to RELAY the Stop-hook
  * directive's token_usage by hand (which it silently dropped — leaving null
  * token columns on ad_hoc/checkpoint rows).
@@ -60,7 +60,6 @@
  * @see plugin/hooks/token-usage.cjs for the transcript-parsing capture adapters
  * @see plugin/hooks/workflow-tracker.cjs for the state writes this hook reads
  * @see plugin/hooks/session-state.cjs for state management
- * @see src/skills/permissions.js for the server-side category source of truth
  */
 
 'use strict';
@@ -210,7 +209,7 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'forge__abandon_workflow',
   'forge__start_workflow',
   'forge__get_workflow_state', // Read-only recovery channel; safe to call mid-CHECKPOINT
-  // Feedback delivery (SHI-771/SHI-807) — the in-workflow session_feedback step
+  // Feedback delivery — the in-workflow session_feedback step
   // and the bundled forge-feedback skill instruct the model to call this. It is a
   // Forge-owned tool that posts feedback to ShipToday (no user-domain mutation),
   // so it must never be blocked by a CHECKPOINT or a step's category allowlist.
@@ -405,7 +404,7 @@ async function main() {
   const state = sessionState.read();
   const bare = bareName(toolName);
 
-  // SHI-724: stamp cumulative token usage onto Forge's own
+  // Stamp cumulative token usage onto Forge's own
   // forge__update_state call — the deterministic analog of the server-side
   // duration_ms stamp. Fires for ANY tracked session: an active workflow
   // (per-step capture) OR a logged/linked observer session (its ad_hoc and
@@ -459,7 +458,7 @@ async function main() {
       // Never clobber a token_usage the caller already set (defensive — the
       // model does not set it today, but a future client might).
       if (tokens && !stateUpdates.token_usage) {
-        // SHI-724 Issue 2: stamp one component bag PER model so the orchestrator
+        // Stamp one component bag PER model so the orchestrator
         // writes a per-model token_usage row — a delegated session (Opus main +
         // Sonnet sub-agent) is then weighted per model at read. Fall back to the
         // combined single bag if an adapter lacks byModel.
@@ -486,8 +485,8 @@ async function main() {
 
       // R1 active-time: stamp duration_ms with idle-excluded ACTIVE time for an
       // active-workflow step (window = [step_active_since, now]). The server
-      // prefers state_updates.duration_ms over its wall-clock fallback
-      // (src/orchestrator.js), so this replaces wall-clock with active time on
+      // prefers state_updates.duration_ms over its wall-clock fallback,
+      // so this replaces wall-clock with active time on
       // the SAME call that already carries the tokens — the client-side analog
       // of the server's duration stamp. Scoped to active workflows: observer
       // (logged/linked) checkpoint duration is owned by the stop-observer
@@ -529,7 +528,7 @@ async function main() {
   // abandon → 3h of idle banked as engineering time, the exact inflation R1
   // removes on update_state). Stamp the idle-excluded active time of the
   // in-flight step as a top-level `duration_ms` input field; the tool handler
-  // threads it into the audit row (src/tools/abandon-workflow.js). Same
+  // threads it into the audit row on the server. Same
   // guards as the update_state stamp: never clobber a caller-set value, and
   // a null capture (Cursor / unreadable transcript) leaves the call unchanged
   // so the server keeps its wall-clock fallback.
@@ -540,7 +539,7 @@ async function main() {
       if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);
       const updated = { ...toolInput };
       let changed = false;
-      // SHI-378 follow-up: stamp the Claude coding-session id so the synthetic
+      // Stamp the Claude coding-session id so the synthetic
       // `__abandoned__` audit row joins the rest of its coding session. Without
       // it the row writes client_session_id = NULL and fragments off its own
       // session under COALESCE(client_session_id, session_id) — orphaning its

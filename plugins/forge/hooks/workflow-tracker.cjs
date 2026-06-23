@@ -103,7 +103,7 @@ function isWorkflowComplete(response) {
 /**
  * Check if a forge__abandon_workflow response indicates a successful abandon.
  * Successful abandon responses begin with "**Workflow abandoned**" — the
- * fixed marker rendered by src/tools/abandon-workflow.js.
+ * fixed marker rendered by the server.
  */
 function isWorkflowAbandoned(response) {
   if (!response) return false;
@@ -121,7 +121,7 @@ function isWorkflowAbandoned(response) {
  *     (`"<step>" paused at confirmation gate`): the orchestrator paused
  *     after the step completed, waiting for the user to confirm advance.
  *
- * Both are rendered by src/tools/update-state.js and both should keep
+ * Both are rendered by the server and both should keep
  * the workflow-guard locked to ask_user / forge__update_state /
  * forge__abandon_workflow until the AI resolves the gate.
  *
@@ -138,7 +138,7 @@ function extractPendingCheckpointStep(response) {
 /**
  * Check if a forge__update_state response indicates a relayed-question
  * RE-ENTRY — the user's answer has flowed back through the parent and the
- * skill is resuming. Marker is rendered by src/tools/update-state.js:
+ * skill is resuming. Marker is rendered by the server:
  * `**RE-ENTRY** — "<step>" resumed with user answer`.
  */
 function isRelayedQuestionReentry(response) {
@@ -188,8 +188,8 @@ function extractCurrentStepSkill(response) {
 //
 // The org-disabled gate is deliberately NOT in this map. It arrives as
 // outcome "observation_disabled" with event_type "observation_skipped" (so
-// the orchestrator suppresses the audit row — see src/orchestrator.js and
-// src/skills/intake/session-observer.js → buildObservationGatedCompletion)
+// the orchestrator suppresses the audit row — handled server-side in the
+// session_observer gated-completion path)
 // and is handled separately by extractObservationGate below. It must NOT map
 // to a tracking status like "logged": a disabled org is not tracked, and a
 // "logged" status would make stop-observer.cjs fire periodic engineering-time
@@ -207,7 +207,7 @@ const OUTCOME_TO_STATUS = {
  * observation_outcome event, or null otherwise. `status` is the mapped local
  * session status (null for stage-carrying outcomes like linked/created that
  * have no status mapping); `outcome` is the raw outcome string the caller can
- * branch on for outcome-specific side effects (e.g. the SHI-759 cache-flag
+ * branch on for outcome-specific side effects (e.g. the cache-flag
  * pin); `sdlcStage` is the observer's classified stage, persisted so
  * stop-observer.cjs periodic checkpoints (which read `state.sdlc_stage`,
  * defaulting to 'other') bank engineering time under the real stage.
@@ -237,8 +237,7 @@ function extractObserverEvent(event) {
 /**
  * Detect the org-disabled gate completion from a forge__update_state input.
  *
- * The session_observer gated-completion payload
- * (src/skills/intake/session-observer.js → buildObservationGatedCompletion)
+ * The session_observer gated-completion payload (built server-side)
  * carries `outcome: "observation_disabled"` — currently with
  * `event_type: "observation_skipped"` so the orchestrator suppresses the
  * audit row. We key off the OUTCOME (not the event_type) so detection stays
@@ -326,7 +325,7 @@ async function main() {
       const invocations = state.skill_invocations || [];
       invocations.push({ name: skillName, at: new Date().toISOString() });
       const updates = { skill_invocations: invocations };
-      // SHI-787: arm the required-skill continuation backstop. If a Forge
+      // Arm the required-skill continuation backstop. If a Forge
       // workflow step is mid-flight when a local skill runs, the model is
       // expected to relay the skill's findings and call forge__update_state in
       // the same turn. A skill prompt like "reply with only your output" can
@@ -413,7 +412,7 @@ async function main() {
   // nudge on top of the clarification prompt the user is still answering.
   //
   // `**Conversation ID**` is rendered ONLY on a real start
-  // (src/tools/start-workflow.js), so its ABSENCE is the robust preflight signal
+  // (by the server), so its ABSENCE is the robust preflight signal
   // across every current and future preflight type — no per-prompt text matching
   // to keep in sync as prompts are reworded or added.
   //
@@ -434,12 +433,12 @@ async function main() {
   // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
-    // SHI-787: any forge__update_state means the model is driving the workflow
+    // Any forge__update_state means the model is driving the workflow
     // forward (advance, checkpoint, re-entry, or completion) — disarm the
     // required-skill continuation backstop so the Stop hook does not nudge.
     sessionState.write({ pending_skill_continuation: false });
 
-    // Org-disabled gate backstop (SHI-758/759). The session_observer gated
+    // Org-disabled gate backstop. The session_observer gated
     // completion tells the AI parent to write forge_observation_enabled: false
     // into the per-session state file, but the parent "consistently forgets
     // because the MCP response's large instruction block captures its
@@ -523,7 +522,7 @@ async function main() {
       // Idempotent-retry exclusion: a duplicate update_state for an already-
       // completed step replays the CACHED advance result — same **NEXT STEP**
       // body — with an explicit **Idempotent Retry** marker (rendered by
-      // src/tools/update-state.js). The step did NOT advance, so the boundary
+      // the server). The step did NOT advance, so the boundary
       // must not move: resetting it mid-step would silently drop the active
       // time accrued on the in-flight step before the retry.
       const text = responseText(toolResponse);

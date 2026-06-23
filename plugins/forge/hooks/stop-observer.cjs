@@ -26,12 +26,12 @@
  *      forge_observation_enabled because the gate is about the observation
  *      NUDGE, not about engineering-time tracking for already-tracked
  *      sessions.
- *   3b. SHI-759: exit silently if the per-session cache says the org
+ *   3b. Exit silently if the per-session cache says the org
  *      admin has disabled observation (forge_observation_enabled =
  *      false). Steady-state zero-roundtrip — no MCP call until the
  *      next Claude Code session starts (which begins with a fresh
  *      cache). Field is written into the cache by the session_observer
- *      gated path (SHI-758) when it first detects the admin opt-out.
+ *      gated path when it first detects the admin opt-out.
  *   4. For snoozed: re-fire observer every CHECKPOINT_INTERVAL turns
  *      (re-prompts user to track)
  *   5. Exit if dismissed (terminal — never re-fires)
@@ -74,7 +74,6 @@
  * @see plugin/hooks/prompt-router.cjs for active PDLC/epic detection
  * @see plugin/hooks/session-state.cjs for state management
  * @see plugin/skills/forge-autopilot/SKILL.md for routing logic
- * @see src/skills/intake/session-observer.js for the Forge MCP skill
  */
 
 'use strict';
@@ -125,7 +124,7 @@ function buildCheckpointResponse(durationMs, state, stateFilePath, event, resolv
     ? `, skill_invocations: ${JSON.stringify(unreported.map(inv => inv.name))}`
     : '';
 
-  // SHI-724: piggyback per-session token capture on the SAME checkpoint
+  // Piggyback per-session token capture on the SAME checkpoint
   // directive — no new hook, no extra round-trip. The caller resolved the
   // session log ONCE (main + sub-agent files; review #10) and the same parsed
   // records fed the active-time delta above — here they yield the CUMULATIVE
@@ -136,8 +135,8 @@ function buildCheckpointResponse(durationMs, state, stateFilePath, event, resolv
   // never perturb the engineering-time checkpoint (NFR: error handling).
   let tokenPayload = '';
   // The Claude coding-session id, carried on the SAME directive so the read side
-  // collapses this session's snapshots across all its conversations (see
-  // audit.js). Set UNCONDITIONALLY — the checkpoint also writes a non-token
+  // collapses this session's snapshots across all its conversations (on the
+  // server). Set UNCONDITIONALLY — the checkpoint also writes a non-token
   // observation_outcome row (the engineering-time bank) that must carry
   // client_session_id so the Overview "Total Sessions" count keys on the coding
   // session. The token branch below adds it to the token_usage row too; this
@@ -150,7 +149,7 @@ function buildCheckpointResponse(durationMs, state, stateFilePath, event, resolv
   try {
     const tokens = captureTokenUsageFromResolved(resolved);
     if (tokens) {
-      // SHI-724 Issue 2: emit one component bag PER model (tokens.byModel) so
+      // Emit one component bag PER model (tokens.byModel) so
       // the orchestrator writes a per-model token_usage row — a delegated
       // session (Opus main + Sonnet sub-agent) is then weighted per model at
       // read. Fall back to the combined single bag if an adapter lacks byModel.
@@ -188,10 +187,10 @@ function buildCheckpointResponse(durationMs, state, stateFilePath, event, resolv
   });
 }
 
-// Concise directive (SHI-760). The hook only needs the model to make the
+// Concise directive. The hook only needs the model to make the
 // invoke/skip decision and call observe_session — the full SDLC taxonomy and
 // false-negative classification live server-side in the session_observer
-// skill (src/skills/intake/session-observer.js). Keeping this short matters
+// skill. Keeping this short matters
 // because some clients (Codex, Cursor) surface the Stop-hook block reason to
 // the user verbatim, where the old ~30-line block read as noise.
 function buildBlockResponse(stateFilePath) {
@@ -210,7 +209,7 @@ function buildBlockResponse(stateFilePath) {
 }
 
 /**
- * SHI-787: continuation directive for the required-skill stall.
+ * Continuation directive for the required-skill stall.
  *
  * Fired when a Forge workflow step is mid-flight, the model invoked a local
  * skill (e.g. a required security-review whose prompt says "reply with only
@@ -261,7 +260,7 @@ async function main() {
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
 
-  // Step 1b (SHI-787): required-skill continuation backstop.
+  // Step 1b: required-skill continuation backstop.
   // A workflow is active and the model invoked a local skill mid-step (e.g. a
   // required security-review), then ended its turn WITHOUT calling
   // forge__update_state — and we are NOT at a relayed-question / confirmation
@@ -335,7 +334,7 @@ async function main() {
     return;
   }
 
-  // Step 3b: SHI-759 — per-session observation gate cache.
+  // Step 3b: per-session observation gate cache.
   //
   // When the MCP-side session_observer skill runs and detects that the
   // org admin has disabled observation (Clerk publicMetadata.
@@ -349,13 +348,13 @@ async function main() {
   // undefined / true / non-boolean) fall through to the normal
   // directive — the hook never pre-suppresses: it fires once and lets the
   // server-side gate make the authoritative opt-in decision (the org default
-  // is now `false`, resolved in src/services/org-settings.js).
+  // is now `false`, resolved on the server).
   //
   // Placed AFTER the linked/logged checkpoint branch so that
   // engineering-time tracking on already-tracked sessions continues
   // independently of the observation toggle — the toggle gates the
   // initial nudge, not silent checkpoints on linked/logged work.
-  // Field name shared verbatim with SHI-741 (Cursor parity).
+  // Field name shared verbatim with the Cursor parity.
   //
   // This cache is intentionally per-session (not cross-session): each new
   // Claude Code / Codex / Cursor session starts with a fresh state file, so
