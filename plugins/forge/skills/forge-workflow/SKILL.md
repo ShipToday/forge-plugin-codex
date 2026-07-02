@@ -95,9 +95,12 @@ inherited at save time — if the admin wants the suggestion, you copy
 it explicitly into the step. NULL on a per-step row is the runtime
 sentinel for "always run".
 
-`caller.teams` lists every team the caller belongs to in this org.
-Use it to map a user-supplied team name to its id when drafting a
-team-scoped workflow (see Step 4).
+`caller.teams` is the set of teams you can scope a workflow to. Because
+this skill is admin-only (see the role gate just below), it lists
+**every team in your org** — not only the ones you belong to — so you
+can target a team without first joining it (SHI-850). Use it to offer
+scope targets and to map a user-supplied team name to its id when
+drafting a team-scoped workflow (see Step 4).
 
 Check `caller.orgRole` immediately:
 
@@ -338,10 +341,42 @@ then the ordered step list. For each step, also show the resolved
 `applicable_expression` you've chosen and (if applicable) the
 canonical default you copied from the catalog skill.
 
-Synthesize an `example_invocation` if the admin hasn't supplied one
-(3–10 word natural-language phrase, lowercase, lead with a verb that
-matches the workflow's primary action — e.g. "review the PR for
-PROJ-123", "run a security review on PROJ-42").
+Set an `example_invocation` — the copyable "try saying" hint shown on
+the dashboard. It MUST start with the Forge wake word `forge, ` followed
+by a 3–10 word natural-language phrase (lowercase, leading with a verb
+that matches the workflow's primary action) — e.g. "forge, review the PR
+for PROJ-123", "forge, run a security review on PROJ-42". Apply the
+`forge, ` prefix whether you synthesize the phrase or the admin supplies
+one; if the admin's phrasing omits it, add it before saving. (The server
+normalizes a missing prefix on save, but authoring it in keeps the
+approval preview accurate.)
+
+### Session Feedback must close every workflow
+
+Every workflow you author MUST end with a **`session_feedback`** step — the
+standard end-of-session recap (steps, artifacts, decisions, timing, and an
+optional anonymized feedback send) that every Forge system default workflow
+closes with. Keeping authored workflows consistent with that convention is
+required, not optional. When you assemble the ordered step list:
+
+- If the admin's steps do **not** already end with `session_feedback`,
+  append one yourself as the final step:
+  `{ "skill_id": "session_feedback", "step_order": <last index>, "confirmation_policy": "auto" }`
+  Leave `applicable_expression` unset (NULL) so it always runs — the system
+  defaults gate nothing on the feedback step.
+- If `session_feedback` is already present but **not** last, move it to the
+  end. There must be exactly one, and it must be the final step.
+- When cloning a baseline that already ends with `session_feedback`, keep it
+  (it renders as `KEEP` in the Step 5 diff); a freshly appended one renders
+  as `INSERT`.
+
+`session_feedback` is a system skill, so it always resolves in Step 6's
+referential check — you never need a `new_skills` entry for it. Surface it in
+the proposal like any other step so the admin sees the closing recap (and can
+change its confirmation policy), but do **not** drop it. The only Forge
+workflow that intentionally omits `session_feedback` is the reserved passive
+`observe_session` tracker, which is not authorable here — so this rule has no
+exceptions on the authoring path.
 
 ## Step 5: Iterate conversationally
 
