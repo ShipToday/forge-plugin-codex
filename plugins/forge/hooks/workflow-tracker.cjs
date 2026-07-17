@@ -181,16 +181,23 @@ function extractCurrentStepSkill(response) {
   return null;
 }
 
-// Maps session_observer outcome values to local session status. These are
-// the outcomes carried on a normal `event_type: "observation_outcome"`
-// payload — the user engaged with the nudge. "linked" is handled separately
-// (observer launches a workflow → active_workflow: true).
+// Fallback map from session_observer outcome values to local session status,
+// used only when the payload carries no valid `final_session_state.status`
+// (older skill payloads). The AUTHORITATIVE source is the skill's declared
+// `final_session_state.status` — see extractObserverEvent. These are the
+// outcomes carried on a normal `event_type: "observation_outcome"` payload —
+// the user engaged with the nudge.
+//
+// "linked"/"created" are intentionally ABSENT here: they have no fallback
+// status because the declared `final_session_state.status` ("linked") now
+// covers them. Before that was honoured, a "linked" outcome that did NOT chain
+// a follow-up workflow (follow_up: null — linking to an already-complete item)
+// left status null and stop-observer.cjs re-fired the nudge every turn.
 //
 // The org-disabled gate is deliberately NOT in this map. It arrives as
 // outcome "observation_disabled" with event_type "observation_skipped" (so
-// the orchestrator suppresses the audit row — handled server-side in the
-// session_observer gated-completion path)
-// and is handled separately by extractObservationGate below. It must NOT map
+// the orchestrator suppresses the audit row via the server's gated-completion
+// path) and is handled separately by extractObservationGate below. It must NOT map
 // to a tracking status like "logged": a disabled org is not tracked, and a
 // "logged" status would make stop-observer.cjs fire periodic engineering-time
 // checkpoints for it. The only thing the gate writes is the per-session +
@@ -200,6 +207,12 @@ const OUTCOME_TO_STATUS = {
   snoozed: 'snoozed',
   dismissed: 'dismissed',
 };
+
+// The tracking statuses stop-observer.cjs recognises. A skill-declared
+// `final_session_state.status` is validated against this set before it is
+// persisted, so a malformed/unknown value can't wedge the checkpoint/nudge
+// logic — it falls back to the outcome mapping instead.
+const VALID_STATUSES = new Set(['logged', 'linked', 'snoozed', 'dismissed']);
 
 /**
  * Extract observer event metadata from a forge__update_state tool input.
@@ -225,7 +238,21 @@ function extractObserverEvent(event) {
   const updates = input.state_updates;
   if (!updates || updates.event_type !== 'observation_outcome') return null;
   if (updates.outcome === 'checkpoint') return null;
-  const status = OUTCOME_TO_STATUS[updates.outcome] || null;
+  // Prefer the skill's DECLARED final state. session_observer emits
+  // `final_session_state.status` as the authoritative post-observation status
+  // (the object its own instructions say the parent must persist). Honouring it
+  // closes the re-nudge loop for a "linked"/"created" outcome that did NOT
+  // chain a follow-up workflow: those have no OUTCOME_TO_STATUS mapping, so the
+  // status stayed null and stop-observer.cjs re-fired the nudge every turn even
+  // though the skill had already declared status: "linked". Validate against
+  // the known set, then fall back to the outcome map for older payloads that
+  // carry no final_session_state.
+  const declared = updates.final_session_state && typeof updates.final_session_state === 'object'
+    ? updates.final_session_state.status
+    : null;
+  const status = (typeof declared === 'string' && VALID_STATUSES.has(declared))
+    ? declared
+    : (OUTCOME_TO_STATUS[updates.outcome] || null);
   const sdlcStage = typeof updates.sdlc_stage === 'string' && updates.sdlc_stage
     ? updates.sdlc_stage
     : null;
@@ -237,7 +264,7 @@ function extractObserverEvent(event) {
 /**
  * Detect the org-disabled gate completion from a forge__update_state input.
  *
- * The session_observer gated-completion payload (built server-side)
+ * The session_observer gated-completion payload (rendered by the server)
  * carries `outcome: "observation_disabled"` — currently with
  * `event_type: "observation_skipped"` so the orchestrator suppresses the
  * audit row. We key off the OUTCOME (not the event_type) so detection stays
