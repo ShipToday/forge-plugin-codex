@@ -118,7 +118,40 @@ Check `caller.orgRole` immediately:
 
 ## Step 2: Intent intake (one question, free-form)
 
-Ask the admin ONE open question and wait for the answer:
+**First — check whether Forge already knows why they're here.**
+
+If a Forge run recap earlier in this conversation ended with a friction
+insight, it already names what happened and what would fix it. It reads
+like:
+
+> Heads up on this run — you confirmed the estimate twice because a step
+> re-asked something you'd already answered. Teams that hit this often
+> loosen the confirmation gates on steps your team already trusts. Want me
+> to set that up for your team? Say "customize my workflow" — I'll carry
+> over what just happened, so it should only take a question or two.
+
+When that insight is in the conversation and the admin has just taken it
+up (e.g. they said "customize my workflow"), **do not ask the intake
+question** — it has already been answered. Forge observed the friction and
+promised to carry it over; making them restate it breaks that promise and
+is exactly the re-asking this exists to prevent. Take the intent as
+**Authoring (Create path)**, treat the customization the insight proposed
+as their opening request, and go straight to Step 3.
+
+Say what you're carrying over so the inference is visible, not silent —
+one line, e.g. *"Starting from what I saw on that run: the estimate gate
+re-asked something you'd answered. I'll loosen that gate — tell me if I've
+got the wrong end of it."* Then proceed. If they correct you, follow the
+correction.
+
+**If there is no such insight in the conversation, ask the normal question
+below.** That is the ordinary case, not an error: the recap only produces
+an insight when a run actually hit fixable friction, and it lives in the
+conversation rather than in storage — so it does not survive into a new
+session. Never block on its absence, never mention it to the admin, and
+never guess at friction that was not handed to you.
+
+Otherwise, ask the admin ONE open question and wait for the answer:
 
 > "What would you like to do — create a new workflow, or remove an
 > existing override? Describe it in your own words."
