@@ -11,12 +11,13 @@ description: >
   test planning and strategy, refactoring, mapping or documenting system
   architecture across the codebase, reconstructing an architecture estate or
   building an architecture atlas, or any similar SDLC activity. ALSO invoke
-  for any reference to a tracked work item key matching the pattern
-  "PROJ-123" / "BUG-42" / any "<UPPERCASE>-<digits>" id, regardless of the
-  verb attached. Do NOT invoke for pure coding requests ("write a function",
-  "refactor this file", "add a test") UNLESS they reference a tracked work
-  item or describe product process. Do NOT invoke for git operations, file
-  editing, or general Q&A unrelated to a project.
+  when the current user request directly targets a tracked work item key matching
+  "PROJ-123" / "BUG-42" / any "<UPPERCASE>-<digits>" id. Do NOT invoke for pure
+  coding requests ("write a function", "refactor this file", "add a test") or
+  continuation of already-scoped execution, even when a tracked key appears only
+  in earlier conversation context. Do NOT invoke for git operations, file editing,
+  applying already-scoped review feedback, resolving merge conflicts, publishing
+  an existing change, or general Q&A unrelated to a project.
 ---
 
 # Forge Autopilot
@@ -29,7 +30,7 @@ Forge's workflow catalog lives on the server side and is fully data-driven.
 You don't need to know which workflows exist — `forge__start_workflow` will
 return a classifier prompt listing all available workflows (Forge defaults
 plus any org-specific workflows configured for the current user) when it
-can't auto-detect the right one. Just call it and follow the instructions.
+needs the client AI to choose. Just call it and follow the instructions.
 
 ## Step 1: Detect connected tools
 
@@ -79,27 +80,64 @@ If no relevant local skills are found, omit the `local_skills` parameter entirel
 
 ## Step 2: Route the request
 
-For ANY product/SDLC request, your **default action** is:
+### Continuation boundary — check before calling Forge
+
+Use the full conversation, not only the user's latest sentence, to decide
+whether this is a new SDLC outcome or continuation of concrete work that is
+already scoped. Handle the request normally without starting Forge when the
+user is:
+
+- implementing specific changes already requested or reviewed in this session;
+- resolving a merge conflict or applying known review comments;
+- editing known files, adding already-specified tests, or fixing an already-
+  diagnosed local defect; or
+- committing, pushing, creating, or updating a pull request for work already
+  in progress.
+
+This boundary still allows Forge when the current request explicitly invokes
+Forge, directly names a tracked work item as the requested outcome's target, asks
+to run a catalog workflow (for example,
+"review this PR"), or asks for a new product/process outcome that has not
+already been scoped. The distinction is the requested outcome: **review a PR**
+is workflow-shaped; **apply these review changes and update the PR** is coding
+continuation. A work item key that appears only in earlier turns or as historical
+context does not override this boundary.
+
+For any product/SDLC request that passes this boundary, your **default action** is:
 
 → `forge__start_workflow(feature_request, connected_tools, local_skills: <detected_skills>)`
 
-Do NOT pass an explicit `workflow` parameter and do NOT try to pre-route to
-a specific skill. Forge handles all routing on the server:
+Do NOT pass an explicit `workflow` parameter on the initial call and do NOT
+try to route to a server-side skill. When intent selection is needed, Forge
+returns the enabled workflow catalog for this user and organization.
 
-- **Unambiguous verbs + epic key** (e.g. "generate PRD for PROJ-123",
-  "review the PR for PROJ-512", "tech handoff for BUG-42") are matched
-  server-side against a configured set of hot-path verbs and routed
-  directly to the right skill in a single round-trip.
-- **Workflow-shaped requests** (e.g. "do a security review", "is PROJ-615
-  ready to ship", "plan the test strategy") are classified server-side
-  against the full workflow catalog (Forge defaults plus any org-specific
-  customer workflows) and routed to the matching workflow.
-- **Ambiguous requests** trigger a classification prompt that you'll need
-  to follow — Forge returns instructions telling you which workflow or
-  skill to call next, and you re-call with `classification_complete: true`.
+- If one workflow clearly matches, re-call `forge__start_workflow` with that
+  explicit catalog workflow id and `classification_complete: true`.
+- If multiple catalog workflows are plausible, present only the relevant
+  catalog workflows to the user. After they choose, re-call with that explicit
+  workflow id and `classification_complete: true`.
+- Never invent a workflow, expose a server-side skill id as an option, or set
+  `classification_complete: true` without an explicit `workflow`.
 
-You do not need to know which workflows or skills exist. The server is
-the source of truth and tells you what to do next via the response.
+The server-provided workflow catalog is the source of truth; the client AI
+owns the contextual choice among those available workflows.
+
+### Admission proposal — validate before activation
+
+A post-classification call returns a server-resolved **workflow proposal**
+before it creates an active conversation. Compare its entry step, missing
+inputs, configured path, and potential side effects with the user's **full
+conversation and current phase**:
+
+- If they align, re-call `forge__start_workflow` with the same arguments plus
+  the returned `admission_token` and `start_confirmed: true`.
+- If they do not align, do **not** confirm and do **not** call
+  `forge__abandon_workflow` — no workflow has started. Choose another workflow
+  only when it is an exact catalog match. If none matches, continue normally
+  when this is coding continuation, otherwise explain that no available Forge
+  workflow fits.
+- Never set `start_confirmed: true` without the server-issued
+  `admission_token` from the immediately preceding proposal.
 
 ### Exception 1 — Help / recommendation request
 
@@ -123,20 +161,21 @@ this explicit `workflow: "observe_session"` argument.
 Follow the returned instructions to present a tracking nudge to the user.
 Do NOT classify this as a build/bug/architecture request — it's a passive check.
 
-#### After `session_observer` completes — read `follow_up`
+#### After any workflow completes — read `follow_up`
 
-When the observer workflow returns `Workflow complete.`, look at the
-final `state_updates` payload you sent. If it includes a `follow_up`
-object (the Link and Create paths set this; Ad-hoc, Snooze, and Dismiss
-paths set `follow_up: null`), **you MUST chain to the follow-up workflow
-before resuming the user's original request**:
+When a workflow returns `Workflow complete.`, look at the final
+`state_updates` payload you sent. If it includes a non-null `follow_up`
+object, **you MUST chain to that workflow before resuming the user's
+original request**. Status reports and session-observer outcomes both use
+this structured handoff contract.
 
 ```
 forge__start_workflow(
   feature_request: <follow_up.feature_request>,
   connected_tools: <same array as before>,
   epic_key: <follow_up.epic_key>,
-  workflow: <follow_up.workflow ?? omit>,
+  workflow: <follow_up.workflow>,
+  classification_complete: <follow_up.classification_complete ?? true>,
   pre_forge_context: <follow_up.pre_forge_context>,
   local_skills: <detected_skills>
 )
@@ -147,17 +186,13 @@ clean: `epic_key` is passed as a structured parameter so any
 `SHI-NNN`-shaped strings inside `pre_forge_context` cannot hijack the
 binding via the embedded-key regex.
 
-If `follow_up` is `null` or absent, do **not** chain — the user's choice
-(Ad-hoc / Snooze / Dismiss) means they explicitly opted out of starting
-a tracked workflow. Continue the conversation normally.
+If `follow_up` is `null` or absent, do **not** chain. Continue the
+conversation normally.
 
 **Common failure mode to avoid**: treating "Workflow complete" as
-"observer is done — go back to the user's original ask". When the user
-picked Link or Create, they implicitly chose to route the rest of the
-session through a tracked workflow — silently going back to the
-original ask leaves their selection unhonored and the audit trail
-blind to which workflow should now be active. Always read `follow_up`
-before resuming.
+"the workflow is done — go back to the user's original ask". A selected
+follow-up is an explicit user route; silently ignoring it leaves that choice
+unhonored. Always read `follow_up` before resuming.
 
 ### Exception 3 — Session checkpoint (passive time tracking)
 
