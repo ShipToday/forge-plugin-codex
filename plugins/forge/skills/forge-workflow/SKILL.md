@@ -312,6 +312,39 @@ purpose based on its `name`, `description`, and (if drafted) its
 so the admin sees what was inferred and can change it in the same
 edit pass — do not silently set the value.
 
+### Visibility: `admin_only` is an explicit question, never a silent default
+
+`admin_only` is access control, not a label — it decides whether the
+whole team can run the workflow or only org admins. Treat it like the
+org-vs-team scope decision: **ask**, don't infer.
+
+Ask it as a plain either/or alongside scope, e.g.:
+
+> **Who can run this workflow?**
+> 1. **Everyone in the org** (default)
+> 2. **Org admins only**
+
+Rules:
+
+- **Default is everyone.** If the admin doesn't care or doesn't answer,
+  omit the field (leave it NULL) and say so in the proposal summary.
+  Omitting is not the same as sending `false` — see below.
+- **Send `true` only on an explicit "admins only".**
+- **Do not confuse it with `default_roles`.** `default_roles` (`["eng",
+  "pm"]`) only *recommends* an audience; it restricts nothing. If an
+  admin says "this is just for engineers", that is `default_roles`, NOT
+  `admin_only`. If they say "members shouldn't be able to run this",
+  that is `admin_only: true`.
+- **Overriding a built-in: omit the field unless you mean to change it.**
+  NULL means *inherit*, so omitting keeps whatever the system default
+  says. Sending an explicit `false` on an override of an admin-only
+  built-in **removes** that restriction and exposes it to every member —
+  only do that when the admin explicitly asks to open it up, and call it
+  out in the Step 8 confirmation.
+- When you set or change `admin_only`, state the consequence plainly in
+  the confirmation: an admin-only workflow disappears from members'
+  catalogs entirely and cannot be started even if they name its id.
+
 ### Findings preservation in custom skill instructions
 
 When drafting a custom skill's `instructions` body, ask the admin a
