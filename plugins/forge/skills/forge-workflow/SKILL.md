@@ -35,8 +35,11 @@ Forge is an MCP server; the tools you will call are:
   the **baseline** before drafting an override.
 - `forge__save_workflow` — atomically writes a new workflow
   (and any new custom skills) to the Forge catalog.
-- `forge__delete_workflow` — removes an org- or team-scoped preset,
-  resetting the scope to the Forge system default.
+- `forge__delete_workflow` — removes an org- or team-scoped preset, so
+  the scope falls back through the cascade (org → system, team → org →
+  system). Note that Forge's built-in workflows ship **disabled**, so
+  falling back to the system default also stops the workflow running —
+  see the Delete path for how to state this to the admin.
 
 ## Why this skill is schema-driven
 
@@ -684,11 +687,15 @@ Use the `workflows` array from Step 1. Filter to items where
 store enforces this. Surface the scope explicitly on each candidate so
 the admin sees what will be reset:
 
-- `scope: 'org'` — the org-level override. Removing it reverts the
-  whole org to the Forge default.
+- `scope: 'org'` — the org-level override. Removing it deletes the
+  org's configuration for that workflow AND stops the workflow
+  running: Forge's built-ins ship disabled, so with no org row there
+  is nothing left to turn it on.
 - `scope: 'team'` — a team-level override. Removing it reverts that
-  one team to the org default (or to the system default if the org
-  has no preset of its own).
+  one team to the org default, which usually keeps the workflow
+  running. If the org has no preset of its own, the team falls all the
+  way to the system default and the workflow stops running for that
+  team too.
 
 If the admin named a workflow directly (e.g. "delete the build-feature
 override for team Alpha"), resolve the target by id + scope and skip
@@ -715,12 +722,35 @@ server resolves it via the `UNIQUE (org_id, name)` index on
 ## Step D3: Explicit admin confirmation
 
 Before calling `forge__delete_workflow`, show the final target and
-the consequence, then ask for explicit confirmation:
+the consequence, then ask for explicit confirmation.
 
-> "Removing this will revert <workflow name> to its parent scope's
-> configuration (<for org → Forge default; for team → org default, or
-> Forge default if the org has none>). This cannot be undone, but you
-> can re-author the override later."
+State the consequence for the target's ACTUAL scope — the two outcomes
+differ materially, and a single sentence covering both misleads on one
+of them. Never describe an org-scoped removal as a "reset to the Forge
+default" or a "revert to Forge's configuration": Forge's built-ins ship
+disabled, so for an org override that phrasing promises a restore and
+delivers a shutdown, on an action you are in the same breath telling
+the admin cannot be undone.
+
+**Org-scoped target:**
+
+> "Removing this deletes your org's configuration for <workflow name>,
+> and <workflow name> will also STOP RUNNING — Forge's built-in
+> workflows ship disabled, so with no org configuration there's nothing
+> left to turn it on. You can re-enable it from the dashboard, or
+> re-author the override here, but this removal cannot be undone."
+
+**Team-scoped target:**
+
+> "Removing this makes <team name> fall back to your org's
+> configuration for <workflow name>; the team keeps running it on the
+> org's settings. This cannot be undone, but you can re-author the
+> team override later."
+
+If the target is team-scoped AND the org has no preset of its own (no
+`scope: 'org'` row for that id in the Step 1 catalog), use the org
+wording instead — the team falls through to the system default and the
+workflow stops running for that team.
 
 Ask the admin to choose "Remove override" or "Cancel". If a structured
 user-input tool is available, use it as the only tool call in that
