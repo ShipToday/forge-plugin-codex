@@ -444,7 +444,12 @@ tier.
    (e.g., "Delegating to a balanced model for this step...")
 4. **Pass the full prompt** — everything below `---DELEGATE BELOW---` in the
    instructions is the delegated prompt. Include all of it
-5. **Delegate when it pays for itself, not reflexively** — for real work
+5. **Everything ABOVE the delimiter stays with you** — it is addressed to the
+   parent, not the sub-agent. In particular, a `<<<FORGE_DISPLAY_VERBATIM …>>>`
+   block above the delimiter is content **for the user** (the "Step N of M"
+   progress marker): render it verbatim BEFORE you delegate, and never fold it
+   into the delegated prompt. See "Must-display blocks" below
+6. **Delegate when it pays for itself, not reflexively** — for real work
    that's off your tier, delegating up buys better reasoning and down saves
    real cost. But each step's advisory carries a **Worth-it check**: when the
    remaining work is only replaying content already in workflow state (a
@@ -452,6 +457,37 @@ tier.
    current model — spawning a sub-agent for that just burns a round-trip.
    Follow the per-step Worth-it check; don't skip delegation merely because
    direct execution is easier
+
+### Must-display blocks
+
+Forge marks content that is meant for the **user** — not for you — by wrapping
+it in a relay envelope:
+
+```
+> **Relay to the user** — render the block between the sentinels below ...
+
+<<<FORGE_DISPLAY_VERBATIM id="position">>>
++==========================================================+
+**Step 2 of 8: Discover AI SDLC** — next: ... · then: ...
++==========================================================+
+<<<END FORGE_DISPLAY_VERBATIM>>>
+```
+
+Rules:
+
+- **Render what is between the sentinels, verbatim** — never the sentinels
+  themselves, and never a summary. It is the user's only view of where the run
+  has got to.
+- **Render it before anything else in that turn** — before analysis, before
+  delegating, before your next tool call.
+- **It is always the parent's job.** These blocks sit OUTSIDE the
+  `<<<FORGE_NEXT_STEP>>>` envelope and above `---DELEGATE BELOW---`, so a
+  sub-agent never receives one as part of its prompt. If you ARE a sub-agent and
+  one appears in a tool result you got, relay it to your parent unrendered along
+  with the envelope — your parent is the one talking to the user.
+- **Two ids exist today**: `preflight` (the "what to expect" brief, once at the
+  start of a run) and `position` (the "Step N of M" marker, once per step).
+  Treat any future id the same way.
 
 ## Step 5: Coexist with planning/dry-run modes
 

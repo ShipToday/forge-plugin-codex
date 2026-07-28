@@ -36,6 +36,10 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/workflow-tracker.cjs\""
+          },
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/must-display.cjs\""
           }
         ]
       }
