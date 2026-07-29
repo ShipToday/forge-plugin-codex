@@ -481,14 +481,13 @@ Rules:
   has got to.
 - **Render it before anything else in that turn** — before analysis, before
   delegating, before your next tool call.
-- **Unless the display hook tells you it is already on screen.** Forge's
-  `must-display` hook runs on `PostToolUse` in this plugin: it renders these
-  blocks to the user itself, then returns a notice saying so as
-  `hookSpecificOutput.additionalContext`. When you see that notice, the block
-  is already in front of the user — do NOT render it again, or they see it
-  twice. The notice wins over the "render verbatim" rule above, because it
-  reports what has already happened. With no such notice, you are the only
-  channel, so render it.
+- **Render it even if you think the display hook already did.** Forge's
+  `must-display` hook runs on `PostToolUse` in this plugin and emits the block
+  itself, but where that output lands is client-dependent — on some clients it
+  goes to the session transcript rather than to the screen, and on a delegated
+  step it never reaches the user at all. You cannot tell from inside the turn,
+  so always render: a duplicate is untidy, a missing marker leaves the user
+  with no view of the run.
 - **It is always the parent's job.** These blocks sit OUTSIDE the
   `<<<FORGE_NEXT_STEP>>>` envelope and above `---DELEGATE BELOW---`, so a
   sub-agent never receives one as part of its prompt. If you ARE a sub-agent and
