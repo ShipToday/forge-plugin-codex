@@ -44,38 +44,39 @@
  * model's context would just spend tokens re-stating what it already read.
  *
  * Belt-and-braces, not replacement: the model may ALSO render the block
- * (and on a compliant turn it will). The dedup below removes the common
- * duplicate — a replayed idempotent retry — but deliberately does not try
- * to detect "the model already showed this", which the hook cannot observe.
+ * (and on a compliant turn it will). Duplicate display is a cosmetic cost;
+ * a silently missing progress marker is the bug. The dedup below removes
+ * the common duplicate — a replayed idempotent retry — but deliberately
+ * does not try to detect "the model already showed this", which the hook
+ * cannot observe.
  *
- * ## Suppressing the double render
+ * ## Why this hook does NOT tell the model to stand down
  *
- * Once the hook has emitted the block, a compliant model rendering it too
- * produces it TWICE on screen and spends the block's full length in output
- * tokens to do it — 80-150 tokens per step, every step, for a duplicate.
- * The original note above called that "a cosmetic cost", which understated
- * it: the cost is paid per step for the life of every run.
+ * A previous version emitted `hookSpecificOutput.additionalContext` — the
+ * model-facing mirror of `systemMessage` — saying the block was already on
+ * screen, to save the 80-150 tokens a compliant model spends rendering it
+ * a second time. That rests on a premise the hook cannot check: that
+ * `systemMessage` is user-VISIBLE on the host client.
  *
- * `hookSpecificOutput.additionalContext` is the mirror of `systemMessage`
- * — shown to the MODEL and not to the user — so the same event that puts
- * the block on screen can also tell the model it is already there. That
- * keeps the two channels in agreement instead of racing.
+ * On `claude-desktop` it is not. The client records the emit as a
+ * `hook_system_message` transcript attachment that the user never sees, so
+ * the model's render was the only visible copy — and suppressing it took
+ * the preflight brief and every "Step N of M" marker off screen entirely
+ * (observed across a full forge_setup run, plugin v1.13.0).
  *
- * Deliberately client-LOCAL. The server's `frameForDisplay` is barred from
- * knowing which client it renders for (SHI-899 AC3, pinned by a test on the
- * function's arity), so the "is the block already on screen?" answer has to
- * come from wherever the display actually happened — which is here.
+ * The asymmetry is what settles it. A duplicate render costs tokens and
+ * looks untidy; a suppressed render costs the user the only view they have
+ * of where the run has got to. The hook cannot distinguish the clients
+ * where the saving is safe — the PostToolUse event carries no client
+ * identity — so it does not try, and never suppresses. Cursor ships no
+ * must-display hook at all, which makes the model the sole channel there in
+ * any case; Codex ships this hook, where the same unverifiable question
+ * applies.
  *
- * That distinction is load-bearing because this hook does NOT ship
- * everywhere. It is wired on PostToolUse in the Claude plugin
- * (forge-plugin-claude, forge-plugin-claude-mp) and in the Codex plugin
- * (forge-plugin-codex), both of which honour `hookSpecificOutput.
- * additionalContext` with this exact shape. forge-plugin-cursor carries no
- * `must-display` hook at all, so on Cursor the model rendering the block
- * remains the ONLY channel and is correctly never suppressed — not by
- * special-casing, but because nothing runs to suppress it. Keeping the
- * suppression in the hook is what makes that fall out for free, with the
- * server never branching on client identity.
+ * It is also moot for a DELEGATED step: the `forge__update_state` call is
+ * made by the sub-agent, so this hook fires in the sub-agent's session (if
+ * at all) and never puts anything in front of the user. There the parent
+ * rendering the relayed block is the only channel that exists.
  *
  * @see plugin/hooks/session-state.cjs for state management
  * @see src/capabilities/protocols/run-contract.js for the emitting side
@@ -105,26 +106,6 @@ const BLOCK_RE = /<<<FORGE_DISPLAY_VERBATIM id="([^"]*)">>>\n([\s\S]*?)\n<<<END 
 
 /** systemMessage is capped at 10,000 chars; stay clear of the ceiling. */
 const MAX_MESSAGE_CHARS = 8000;
-
-/**
- * Told to the MODEL (never the user) whenever this event carried a
- * must-display block — whether or not the systemMessage was emitted for it.
- *
- * Emitted on the duplicate-replay path too: there the user saw the block on
- * the FIRST emit, so a model rendering it on the replay is the same double
- * render, minus the hook's own contribution.
- *
- * Phrased as a statement of fact plus one instruction. It has to overrule a
- * "render this verbatim" directive sitting in the same payload, so it names
- * what already happened rather than asking for cooperation — and it says
- * what to do INSTEAD, because a bare prohibition tends to produce a
- * paraphrase ("I've shown you the step marker above") which is the same
- * tokens with worse fidelity.
- */
-const ALREADY_DISPLAYED_NOTICE = 'Forge display hook: the FORGE_DISPLAY_VERBATIM block(s) in that tool '
-  + 'response have ALREADY been rendered to the user by this hook — they are on screen now. Do not '
-  + 'render, quote, summarize, or otherwise restate them; doing so shows the user the same block '
-  + 'twice. Proceed directly to the step body.';
 
 // -- Pure helpers (exported for tests) ---------------------------------------
 
@@ -217,61 +198,35 @@ function fingerprint(blocks) {
  * fingerprint and persists the returned one. Keeps the whole decision testable
  * without a session file or a live hook harness.
  *
+ * Never returns anything model-facing: the hook's whole output is the
+ * user-visible `systemMessage`. See "Why this hook does NOT tell the model to
+ * stand down" above.
+ *
  * @param {{ tool_name?: string, tool_response?: any }} event
  * @param {string|null} lastFingerprint
- * @returns {{ systemMessage: string|null, additionalContext: string|null,
- *   fingerprint: string|null, reason: string }}
+ * @returns {{ systemMessage: string|null, fingerprint: string|null, reason: string }}
  */
 function decide(event, lastFingerprint) {
   const toolName = event && event.tool_name;
   if (!isDisplayBearingTool(toolName)) {
-    return {
-      systemMessage: null,
-      additionalContext: null,
-      fingerprint: lastFingerprint || null,
-      reason: 'not_a_forge_display_tool',
-    };
+    return { systemMessage: null, fingerprint: lastFingerprint || null, reason: 'not_a_forge_display_tool' };
   }
   const blocks = extractDisplayBlocks(event.tool_response);
   if (blocks.length === 0) {
-    return {
-      systemMessage: null,
-      additionalContext: null,
-      fingerprint: lastFingerprint || null,
-      reason: 'no_display_block',
-    };
+    return { systemMessage: null, fingerprint: lastFingerprint || null, reason: 'no_display_block' };
   }
   const fp = fingerprint(blocks);
   if (lastFingerprint && fp === lastFingerprint) {
     // An idempotent retry replays the cached advance body verbatim. Re-emitting
     // would show the user the same "Step 3 of 8" twice for one real step.
-    //
-    // The suppression notice still goes out: the block is in THIS response's
-    // text, so the model can render it now even though the user saw it on the
-    // first emit. Suppressing on the replay is the same win as suppressing on
-    // the original.
-    return {
-      systemMessage: null,
-      additionalContext: ALREADY_DISPLAYED_NOTICE,
-      fingerprint: fp,
-      reason: 'duplicate_replay',
-    };
+    return { systemMessage: null, fingerprint: fp, reason: 'duplicate_replay' };
   }
   let message = blocks.map((b) => b.body).join('\n\n');
   if (message.length > MAX_MESSAGE_CHARS) {
     message = `${message.slice(0, MAX_MESSAGE_CHARS - 1)}…`;
-    // A truncated systemMessage means the user did NOT get the whole block, so
-    // the model must stay free to render it in full. Fidelity beats the
-    // duplicate-render saving here: a silently half-shown brief is the bug the
-    // hook exists to prevent.
-    return { systemMessage: message, additionalContext: null, fingerprint: fp, reason: 'emitted_truncated' };
+    return { systemMessage: message, fingerprint: fp, reason: 'emitted_truncated' };
   }
-  return {
-    systemMessage: message,
-    additionalContext: ALREADY_DISPLAYED_NOTICE,
-    fingerprint: fp,
-    reason: 'emitted',
-  };
+  return { systemMessage: message, fingerprint: fp, reason: 'emitted' };
 }
 
 // -- Main ---------------------------------------------------------------------
@@ -297,10 +252,7 @@ async function main() {
   }
 
   const result = decide(event, last);
-  // The duplicate-replay path emits no systemMessage but DOES carry the
-  // suppression notice, so gate on "nothing to say at all" rather than on the
-  // systemMessage alone.
-  if (!result.systemMessage && !result.additionalContext) return;
+  if (!result.systemMessage) return;
 
   try {
     sessionState.write({ last_display_fingerprint: result.fingerprint });
@@ -308,26 +260,11 @@ async function main() {
     // Persisting dedup state is best-effort; showing the block is not.
   }
 
-  const payload = {};
-  if (result.systemMessage) payload.systemMessage = result.systemMessage;
-  if (result.additionalContext) {
-    payload.hookSpecificOutput = {
-      hookEventName: 'PostToolUse',
-      additionalContext: result.additionalContext,
-    };
-  }
-  process.stdout.write(JSON.stringify(payload));
+  process.stdout.write(JSON.stringify({ systemMessage: result.systemMessage }));
 }
 
 // Exported for the unit test; `require.main` guard keeps importing side-effect free.
-module.exports = {
-  decide,
-  extractDisplayBlocks,
-  isDisplayBearingTool,
-  responseText,
-  fingerprint,
-  ALREADY_DISPLAYED_NOTICE,
-};
+module.exports = { decide, extractDisplayBlocks, isDisplayBearingTool, responseText, fingerprint };
 
 if (require.main === module) {
   main().catch(() => {
