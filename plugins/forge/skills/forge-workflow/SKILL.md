@@ -315,6 +315,40 @@ purpose based on its `name`, `description`, and (if drafted) its
 so the admin sees what was inferred and can change it in the same
 edit pass — do not silently set the value.
 
+### SDLC stage: propose one for the WORKFLOW too, not just its skills
+
+`workflow_presets.sdlc_stage` is the workflow-level peer of the
+per-skill field above, and it drives the stage badge, the stage
+grouping and the stage filter on the dashboard's Workflows page. It
+lives in `field_schema.workflow_preset`, so the same `valuesFrom`
+rule applies: take the value from the catalog's `sdlc_stages` array,
+never invent one.
+
+Propose a stage whenever a workflow is created or edited, then let
+the admin confirm or override — the same posture as the per-skill
+proposal, rendered in the same summary.
+
+**Pick by the workflow's PURPOSE, not by counting its steps.** This
+is the part that is easy to get wrong. Steps like
+`receive_epic_handoff`, `gather_work_item_docs` and `session_feedback`
+are scaffolding that appears across workflows of every kind, and they
+carry stages of their own — so a "most common step stage wins" rule
+reliably mislabels a workflow. A UI-mockup workflow, for instance,
+ties two `planning` scaffolding steps against its two real `design`
+steps, and a plurality rule would call it planning or nothing at all.
+Read the workflow's `name`, `description` and `classifier_hint` and
+ask what it is FOR.
+
+Use `other` for admin, notification, onboarding and session-ops
+workflows that genuinely do not belong to a delivery stage — it is a
+first-class stage, not a dumping ground for uncertainty.
+
+Omitting the field leaves it NULL, which means **inherit**: for an
+override of a built-in the system row's stage stands, and for a
+brand-new custom workflow it renders as `other` until someone sets
+it. Say which of those you are doing in the proposal summary rather
+than letting the admin discover it on the dashboard.
+
 ### Visibility: `admin_only` is an explicit question, never a silent default
 
 `admin_only` is access control, not a label — it decides whether the
