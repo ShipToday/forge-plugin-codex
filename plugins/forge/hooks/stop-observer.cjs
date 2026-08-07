@@ -284,7 +284,26 @@ async function main() {
   // Step 3: Linked/logged sessions — silent checkpoint every CHECKPOINT_INTERVAL
   // turns (or FLUSH_INTERVAL if there are pending skill invocations to report),
   // OR every TIME_FLOOR_MS of wall-clock — whichever comes first.
-  if (state.status === 'linked' || state.status === 'logged') {
+  // Also entered when the ORG has observation switched off. The gate used to be
+  // `status === 'linked' || 'logged'` alone — a user-engagement state — which
+  // made the checkpoint, and the token capture riding on it, unreachable for
+  // such an org: the nudge below never runs, so the user is never asked to link
+  // or log, so `status` stays null forever and this branch never opened. That
+  // org could not have captured a token here even in principle.
+  //
+  // Keyed on `forge_observation_enabled === false` specifically, NOT on
+  // `status == null`. Null conflates two cases that need opposite handling:
+  // "not asked YET" (must fall through to the nudge) and "will never be asked"
+  // (nothing to starve, so capture here). Only the org flag distinguishes them.
+  // Widening to null instead silently converted every not-yet-nudged session
+  // into a checkpoint-only session and suppressed the nudge permanently.
+  //
+  // Sessions reaching this branch via the org flag return at the `!directive`
+  // check below when there is no observer conversation to attach to — the same
+  // outcome as the `forge_observation_enabled === false` short-circuit further
+  // down, so no behaviour is lost either way.
+  const observationDisabledForOrg = state.forge_observation_enabled === false;
+  if (state.status === 'linked' || state.status === 'logged' || observationDisabledForOrg) {
     if (state.active_workflow) return; // Forge skills track their own time
     const turnsSinceLast = state.turn_count - (state.last_observer_turn || 0);
     // Use shorter interval when local skill invocations are pending

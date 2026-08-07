@@ -35,20 +35,79 @@ const crypto = require('crypto');
 // -- Constants ---------------------------------------------------------------
 
 const STATE_DIR = path.join(os.tmpdir(), 'forge-observer');
-const TTL_MS = 4 * 60 * 60 * 1000;       // 4 hours — matches Forge's Redis TTL
+// Idle window, not a lifetime cap: state is reset once a session has gone this
+// long without a WRITE (see read()). A live session refreshes its own mtime, so
+// this only fires on genuine inactivity.
+const TTL_MS = 4 * 60 * 60 * 1000;       // 4 hours idle
 const CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours — auto-clean stale files
 
 // -- Helpers -----------------------------------------------------------------
 
+// TEMPORARY DIAGNOSTIC — remove once the cwd-change trigger is identified.
+const TRACE_FILE = path.join(STATE_DIR, 'cwd-trace.jsonl');
+const TRACE_MAX_BYTES = 2 * 1024 * 1024;
+let tracedKey = null; // per-process: collapse repeat stateKey() calls to one line
+
 /**
- * Compute the state file key. Scoped to the Claude Code session when a
- * session id is available so concurrent sessions in the same working
- * directory get independent state. Falls back to a cwd-only key when no
- * session id is present.
+ * Record the cwd each hook process uses to key session state.
+ *
+ * `stateKey` mixes `process.cwd()` into the hash, so a cwd change mid-session
+ * silently re-keys the state file: `active_workflow` / `status` are orphaned,
+ * token capture stops (both the Stop-hook and workflow-guard paths gate on
+ * them), and the guard's per-step tool allowlist fails OPEN. That has been
+ * observed in the wild but the trigger is unknown — this makes it visible
+ * after the fact.
+ *
+ * Lightweight by construction: one line per hook process (repeat calls within
+ * a process are skipped), bounded by TRACE_MAX_BYTES, and fail-soft — a
+ * diagnostic must never break a hook. Disable with FORGE_CWD_TRACE=0.
+ */
+function traceCwd(sessionId, cwd, key) {
+  if (process.env.FORGE_CWD_TRACE === '0') return;
+  if (tracedKey === key) return;
+  tracedKey = key;
+  try {
+    ensureDir();
+    if (fs.existsSync(TRACE_FILE) && fs.statSync(TRACE_FILE).size > TRACE_MAX_BYTES) return;
+    fs.appendFileSync(TRACE_FILE, `${JSON.stringify({
+      t: new Date().toISOString(),
+      hook: path.basename(process.argv[1] || '?', '.cjs'),
+      pid: process.pid,
+      sid: sessionId || null,
+      cwd,
+      key,
+    })}\n`);
+  } catch {
+    /* diagnostics must never break a hook */
+  }
+}
+
+/**
+ * Compute the state file key.
+ *
+ * Keyed on the session id ALONE when one is available. The cwd is only a
+ * fallback for the no-session case.
+ *
+ * It used to be `hash(cwd + ':' + sessionId)`, with the cwd there so that
+ * "concurrent sessions in the same working directory get independent state" —
+ * but the session id already guarantees that on its own, and mixing in a
+ * MUTABLE runtime value meant the key could change underneath a live session.
+ * When it did, the hook did not find the old state: it started a brand-new file
+ * reporting no active workflow, which silently disabled token capture, the
+ * per-step tool allowlist and the CHECKPOINT pin for the rest of the run.
+ *
+ * Confirmed rather than theorised: one real session produced two state files,
+ * and both filenames were reproduced exactly by hashing this function's input —
+ * one with the session's own worktree, one with a SECOND repository the run had
+ * touched. Session id alone is stable for the session's whole life, so the key
+ * no longer depends on where a hook process happens to be standing.
  */
 function stateKey(sessionId) {
-  const material = sessionId ? `${process.cwd()}:${sessionId}` : process.cwd();
-  return crypto.createHash('sha256').update(material).digest('hex').slice(0, 16);
+  const cwd = process.cwd();
+  const material = sessionId || cwd;
+  const key = crypto.createHash('sha256').update(material).digest('hex').slice(0, 16);
+  traceCwd(sessionId, cwd, key);
+  return key;
 }
 
 function statePath(sessionId) {
@@ -177,37 +236,60 @@ function forSession(sessionId) {
 
   /**
    * Read this session's state.
-   * Returns a fresh state if the file doesn't exist or is stale (> TTL_MS old).
-   * Also triggers cleanup of stale files older than CLEANUP_AGE_MS.
+   * Returns a fresh state if the file doesn't exist or the session has been
+   * IDLE longer than TTL_MS. Also triggers cleanup of files older than
+   * CLEANUP_AGE_MS.
+   *
+   * Pure read — never persists. A read that materialised state made "never
+   * seen this session" indistinguishable from "seen it, and it says no
+   * workflow is running": a hook firing under a new key did not merely miss the
+   * state, it wrote a decoy that then looked like a legitimate fresh session.
+   * That is what made a re-key silently disable token capture and the guard's
+   * per-step allowlist rather than surfacing as an error. The file is now
+   * created by the first write() instead, so an absent file means exactly
+   * that, and callers can tell the two apart.
    */
   function read() {
     ensureDir();
     cleanupStale();
 
-    if (!fs.existsSync(fp)) {
-      const state = freshState(sessionId);
-      writeRaw(state);
-      return state;
-    }
+    if (!fs.existsSync(fp)) return freshState(sessionId);
 
     try {
       const raw = fs.readFileSync(fp, 'utf8');
       const state = JSON.parse(raw);
 
-      // Check staleness — if older than TTL, start a new session
-      const age = Date.now() - new Date(state.session_start).getTime();
-      if (age > TTL_MS) {
-        const fresh = freshState(sessionId);
-        writeRaw(fresh);
-        return fresh;
+      // Staleness is measured from the last WRITE (file mtime), not from
+      // session_start — a sliding idle window rather than an absolute cap.
+      //
+      // The absolute form reset a session purely for having lasted a long time,
+      // which is not what the TTL is for: its job is session-boundary detection
+      // ("you left overnight, start fresh"), and that is an IDLE concept. The
+      // old form silently wiped active_workflow, current_step_tools,
+      // pending_checkpoint, step_active_since and the checkpoint baseline in the
+      // middle of any run past the cap — observed on a 5.5h workflow, where it
+      // disarmed the CHECKPOINT pin and the per-step allowlist and stopped the
+      // engineering-time checkpoint from ever firing again.
+      //
+      // Sliding needs no touch-on-read: prompt-router writes turn_count on every
+      // user turn and workflow-tracker writes on every PostToolUse, so any live
+      // session refreshes its own mtime continuously, while a genuinely idle one
+      // still ages out on schedule. Deliberately NOT "never expire while
+      // active_workflow" — a workflow abandoned without the hook observing it
+      // (crash, force-quit, model never calls abandon) would pin the state
+      // forever and leave a stale allowlist enforcing indefinitely.
+      let lastTouchedMs;
+      try {
+        lastTouchedMs = fs.statSync(fp).mtimeMs;
+      } catch {
+        lastTouchedMs = new Date(state.session_start).getTime();
       }
+      if (Date.now() - lastTouchedMs > TTL_MS) return freshState(sessionId);
 
       return state;
     } catch {
-      // Corrupted file — start fresh
-      const state = freshState(sessionId);
-      writeRaw(state);
-      return state;
+      // Corrupted file — start fresh (still without persisting).
+      return freshState(sessionId);
     }
   }
 
