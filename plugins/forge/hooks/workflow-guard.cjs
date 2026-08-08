@@ -406,15 +406,30 @@ async function main() {
 
   // Stamp cumulative token usage onto Forge's own
   // forge__update_state call — the deterministic analog of the server-side
-  // duration_ms stamp. Fires for ANY tracked session: an active workflow
-  // (per-step capture) OR a logged/linked observer session (its ad_hoc and
-  // periodic-checkpoint update_state calls). Runs BEFORE the active_workflow
-  // guard below, because observer-checkpoint calls happen with
-  // active_workflow=false (the observe_session workflow has already
-  // completed), and the legacy #657 path — which relies on the MODEL relaying
-  // the Stop-hook directive's token_usage — drops them (observed: an ad_hoc
-  // session whose model never relayed, leaving null token columns). The
-  // updatedInput rewrite makes capture independent of the model.
+  // duration_ms stamp. Fires on EVERY forge__update_state, with NO session-state
+  // precondition. Runs BEFORE the active_workflow guard below, because
+  // observer-checkpoint calls happen with active_workflow=false (the
+  // observe_session workflow has already completed), and the legacy #657 path —
+  // which relies on the MODEL relaying the Stop-hook directive's token_usage —
+  // drops them (observed: an ad_hoc session whose model never relayed, leaving
+  // null token columns). The updatedInput rewrite makes capture independent of
+  // the model.
+  //
+  // Deliberately STATELESS. This used to require
+  // `active_workflow || status === 'logged' || status === 'linked'`, which made
+  // capture inherit every failure mode of the session-state file: a cwd change
+  // re-keyed the state mid-session, and the TTL reset it, and in both cases the
+  // freshly-created state reported no workflow — so capture silently stopped for
+  // the rest of the run. Observed in the wild: a 5.5h session recorded 21
+  // workflow steps and zero token rows.
+  //
+  // The precondition also bought nothing. Reaching this line already means the
+  // model is calling forge__update_state, so a Forge conversation exists by
+  // construction — that IS the "tracked session" signal, and it comes from the
+  // event rather than from disk. Everything the capture needs (`event`, the
+  // transcript, `event.session_id`) is likewise event-derived, so nothing here
+  // can be lost to a re-key or an expiry. The active-time stamp further down
+  // still reads state and keeps its own guard.
   //
   // captureTokenUsage parses the local transcript (main + sub-agent files)
   // into a CUMULATIVE raw-component snapshot; the orchestrator writes it to a
@@ -428,9 +443,7 @@ async function main() {
   // updatedInput requires Claude Code >= 2.0.10; older clients ignore it
   // (graceful no-capture, no breakage). Fail-soft: any parse/IO error leaves
   // the call unchanged — token capture must never block forge__update_state.
-  const trackedSession = state.active_workflow
-    || state.status === 'logged' || state.status === 'linked';
-  if (bare === 'forge__update_state' && trackedSession) {
+  if (bare === 'forge__update_state') {
     // Codex build: the stamp is delivered via updatedInput, which Codex only
     // honors from rust-v0.131.0 — bail BEFORE any capture work (rollout
     // parsing is wasted when the rewrite can't be delivered). See the gate's
