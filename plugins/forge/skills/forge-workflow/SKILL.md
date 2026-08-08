@@ -45,7 +45,7 @@ Forge is an MCP server; the tools you will call are:
 
 You **do not** carry a hardcoded list of workflow / step fields. The
 catalog response includes a `field_schema` block that enumerates every
-admin-editable field on `workflow_presets` and `preset_steps`. When the
+admin-editable field on the workflow preset and its steps. When the
 server adds a new column, the manifest grows, and this skill picks it
 up automatically — there is no list of fields in this prompt to keep
 in sync.
@@ -101,7 +101,7 @@ sentinel for "always run".
 `caller.teams` is the set of teams you can scope a workflow to. Because
 this skill is admin-only (see the role gate just below), it lists
 **every team in your org** — not only the ones you belong to — so you
-can target a team without first joining it (SHI-850). Use it to offer
+can target a team without first joining it. Use it to offer
 scope targets and to map a user-supplied team name to its id when
 drafting a team-scoped workflow (see Step 4).
 
@@ -188,7 +188,7 @@ Use the `skills` and `workflows` arrays from Step 1 — do NOT call
   your proposed steps, and/or pick the closest existing workflow as
   the baseline to clone from. When you clone, you may also clone the
   baseline workflow's per-step `applicable_expression` values verbatim
-  (post-Tier 2, the runtime cascade no longer fills these in for you).
+  (the runtime cascade never fills these in for you).
 - If the catalog returns **no usable matches** for the stated intent,
   proceed with a fully synthesised draft (all steps defined as new
   custom skills) and tell the admin: "I didn't find reusable skills
@@ -297,14 +297,15 @@ For each manifest entry, decide what to do:
   intent. Surface non-default decisions to the admin so they can
   override. When `nullMeans` is set on a nullable field, prefer the
   explicit value over NULL if you have one (e.g. write `"true"` for
-  "always run" rather than NULL — both work post-Tier 2, but the
+  "always run" rather than NULL — both work, but the
   explicit form is clearer in audit logs).
 
 When iterating `field_schema.new_skill` for any inline `new_skills`
 entries, fields with `valuesFrom` pointing at the catalog (e.g.
 `sdlc_stages[].id`) MUST take their value from the corresponding
-catalog list — never invent values. If the catalog list is empty
-(pre-seeding), leave the field NULL and note the gap to the admin.
+catalog list — never invent values. If the catalog list is empty (the
+stage list hasn't been populated for this org yet), leave the field
+NULL and note the gap to the admin.
 
 For new skills specifically: when an admin creates or edits a skill,
 **propose an SDLC stage** before save, then let the admin confirm or
@@ -317,7 +318,7 @@ edit pass — do not silently set the value.
 
 ### SDLC stage: propose one for the WORKFLOW too, not just its skills
 
-`workflow_presets.sdlc_stage` is the workflow-level peer of the
+The workflow preset's `sdlc_stage` is the workflow-level peer of the
 per-skill field above, and it drives the stage badge, the stage
 grouping and the stage filter on the dashboard's Workflows page. It
 lives in `field_schema.workflow_preset`, so the same `valuesFrom`
@@ -554,7 +555,7 @@ When you detect an unreachable step, do NOT save. Instead:
 > (c) keep it as-is (the step will be permanently dormant)?"
 
 Ask the admin for the choice. This is the structural fix for
-the bug class that motivated Tier 2 — admins should never accidentally
+a whole class of misconfiguration — admins should never accidentally
 configure dormant steps because of an inherited expression they didn't
 mean to keep.
 
@@ -665,7 +666,7 @@ Currently the server emits one warning code:
 
 | Warning code                       | What it means                                                                                       | Offer                                                |
 |------------------------------------|-----------------------------------------------------------------------------------------------------|------------------------------------------------------|
-| `missing_display_text_guidance`    | A `new_skills.instructions` body OR a `preset_steps.instructions` full override emits `needs_input` without mentioning `display_text` — at runtime, any analytical output the executor renders before the tool call will die on the sub-agent boundary | Tell the admin which skill / step is affected (use the `skill_id` / `step_order` fields), summarise the risk in plain language, and offer to add `display_text` guidance in a quick follow-up `forge__save_workflow` call. If the admin says "no, this skill genuinely doesn't produce findings worth surfacing", accept and move on — the warning is soft by design. |
+| `missing_display_text_guidance`    | A `new_skills.instructions` body OR a `workflow.steps.instructions` full override emits `needs_input` without mentioning `display_text` — at runtime, any analytical output the executor renders before the tool call will die on the sub-agent boundary | Tell the admin which skill / step is affected (use the `skill_id` / `step_order` fields), summarise the risk in plain language, and offer to add `display_text` guidance in a quick follow-up `forge__save_workflow` call. If the admin says "no, this skill genuinely doesn't produce findings worth surfacing", accept and move on — the warning is soft by design. |
 
 Render the warnings inline with the success message, e.g.:
 
@@ -750,8 +751,8 @@ the team directly, match against `caller.teams` by name. If the name
 is ambiguous or missing, ask them to pick from the team list.
 
 Prefer `team_name` over `team_id` when invoking the MCP tool — the
-server resolves it via the `UNIQUE (org_id, name)` index on
-`org_teams`.
+server resolves the name for you (team names are unique within an
+org).
 
 ## Step D3: Explicit admin confirmation
 
