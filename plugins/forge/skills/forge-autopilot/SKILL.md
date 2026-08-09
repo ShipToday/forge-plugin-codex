@@ -183,7 +183,7 @@ forge__start_workflow(
 
 The four-field structured shape keeps the bound work item key
 clean: `epic_key` is passed as a structured parameter so any
-`SHI-NNN`-shaped strings inside `pre_forge_context` cannot hijack the
+`PROJ-NNN`-shaped strings inside `pre_forge_context` cannot hijack the
 binding via the embedded-key regex.
 
 If `follow_up` is `null` or absent, do **not** chain. Continue the
