@@ -36,19 +36,44 @@
  * hook is the only lever that is deterministic, and therefore the only
  * one that can actually be tested.
  *
- * ## How
+ * ## How — a breadcrumb, not a second copy
  *
  * `systemMessage` is the one documented PostToolUse output field that is
  * shown to the USER and not to the model. That asymmetry is exactly right
  * here: the block is user-facing content, and echoing it back into the
  * model's context would just spend tokens re-stating what it already read.
  *
+ * What it emits is ONE LINE — the block's heading, or its first real line
+ * where it has none. Claude Code renders a hook's `systemMessage` by
+ * prefixing EVERY line with `PostToolUse:<tool> says:`, so a four-line
+ * block (heading, `next:` trail, blank, rule) became four prefixed lines
+ * sitting directly above the model's own clean render of the same content.
+ * The floor was doing its job and still reading as noise.
+ *
+ * So the two channels get different jobs rather than the same job twice:
+ * the hook guarantees the user always knows WHERE the run is, and the
+ * model's render carries the full block as ordinary markdown.
+ *
  * Belt-and-braces, not replacement: the model may ALSO render the block
- * (and on a compliant turn it will). Duplicate display is a cosmetic cost;
- * a silently missing progress marker is the bug. The dedup below removes
- * the common duplicate — a replayed idempotent retry — but deliberately
- * does not try to detect "the model already showed this", which the hook
- * cannot observe.
+ * (and on a compliant turn it will). A one-line breadcrumb alongside it is
+ * a cosmetic cost; a silently missing progress marker is the bug. The dedup
+ * below removes the common duplicate — a replayed idempotent retry — but
+ * deliberately does not try to detect "the model already showed this",
+ * which the hook cannot observe.
+ *
+ * ## Rejected: emit nothing and let the model render
+ *
+ * The obvious way to remove the noise entirely is to flip this hook from
+ * renderer to reminder — emit a model-facing "render it now" and no
+ * `systemMessage` at all. Rejected: it trades the one deterministic channel
+ * in the chain for an unverifiable one, and the paragraph above is why
+ * unverifiable is the whole problem here — a green test proves nothing.
+ *
+ * A Stop-hook backstop that re-emits only when the model demonstrably
+ * skipped was rejected for a different reason: it fires at END of turn, so
+ * a recovered "Step 2 of 3" arrives after step 2 already ran. It guarantees
+ * presence, not timeliness, and timeliness is most of what a progress
+ * marker is for.
  *
  * ## Why this hook does NOT tell the model to stand down
  *
@@ -104,8 +129,14 @@ const DISPLAY_BEARING_TOOLS = [
 
 const BLOCK_RE = /<<<FORGE_DISPLAY_VERBATIM id="([^"]*)">>>\n([\s\S]*?)\n<<<END FORGE_DISPLAY_VERBATIM>>>/g;
 
-/** systemMessage is capped at 10,000 chars; stay clear of the ceiling. */
-const MAX_MESSAGE_CHARS = 8000;
+/**
+ * Breadcrumb cap. `systemMessage` allows 10,000 chars, but the bound that
+ * matters here is readability: this is a one-line locator, not the content.
+ */
+const MAX_BREADCRUMB_CHARS = 200;
+
+/** A markdown thematic break — the block's trailing separator, never its label. */
+const RULE_RE = /^-{3,}$/;
 
 // -- Pure helpers (exported for tests) ---------------------------------------
 
@@ -192,6 +223,30 @@ function fingerprint(blocks) {
 }
 
 /**
+ * Reduce one block to the single line that identifies it: its heading, or
+ * its first real line when it has none (the `findings` block is bare prose).
+ *
+ * Returns '' when there is nothing to name, so the caller can drop the
+ * segment rather than emit an empty one.
+ */
+function breadcrumbFor(body) {
+  const first = String(body || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l && !RULE_RE.test(l));
+  return first ? first.replace(/^#{1,6}\s+/, '') : '';
+}
+
+/**
+ * One line for the whole event, however many blocks it carried. The response
+ * that opens a run carries `preflight` AND `position`; joining them keeps
+ * that a single prefixed line instead of two.
+ */
+function breadcrumb(blocks) {
+  return blocks.map((b) => breadcrumbFor(b.body)).filter(Boolean).join(' · ');
+}
+
+/**
  * Decide what this event should surface.
  *
  * Pure: no I/O, no process state — the caller supplies the previously-emitted
@@ -221,9 +276,13 @@ function decide(event, lastFingerprint) {
     // would show the user the same "Step 3 of 8" twice for one real step.
     return { systemMessage: null, fingerprint: fp, reason: 'duplicate_replay' };
   }
-  let message = blocks.map((b) => b.body).join('\n\n');
-  if (message.length > MAX_MESSAGE_CHARS) {
-    message = `${message.slice(0, MAX_MESSAGE_CHARS - 1)}…`;
+  let message = breadcrumb(blocks);
+  if (!message) {
+    // Blocks that are nothing but a separator have no line to name them.
+    return { systemMessage: null, fingerprint: fp, reason: 'no_breadcrumb' };
+  }
+  if (message.length > MAX_BREADCRUMB_CHARS) {
+    message = `${message.slice(0, MAX_BREADCRUMB_CHARS - 1)}…`;
     return { systemMessage: message, fingerprint: fp, reason: 'emitted_truncated' };
   }
   return { systemMessage: message, fingerprint: fp, reason: 'emitted' };
@@ -264,7 +323,7 @@ async function main() {
 }
 
 // Exported for the unit test; `require.main` guard keeps importing side-effect free.
-module.exports = { decide, extractDisplayBlocks, isDisplayBearingTool, responseText, fingerprint };
+module.exports = { decide, extractDisplayBlocks, isDisplayBearingTool, responseText, fingerprint, breadcrumb };
 
 if (require.main === module) {
   main().catch(() => {
