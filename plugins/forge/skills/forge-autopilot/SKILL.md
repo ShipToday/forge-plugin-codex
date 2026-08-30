@@ -114,8 +114,13 @@ returns the enabled workflow catalog for this user and organization.
 - If one workflow clearly matches, re-call `forge__start_workflow` with that
   explicit catalog workflow id and `classification_complete: true`.
 - If multiple catalog workflows are plausible, present only the relevant
-  catalog workflows to the user. After they choose, re-call with that explicit
-  workflow id and `classification_complete: true`.
+  catalog workflows to the user, always with a final "None of these fit"
+  option — a user handed the wrong options must never be cornered into one.
+  After they choose, re-call with that explicit workflow id,
+  `classification_complete: true`, and `routing_ask: { asked: true, scope:
+  "catalog", offered: [<the ids you offered>] }`. If they pick "None of these
+  fit" — or skip the question — treat the request as having no match and
+  follow the instructions Forge returns; do not re-ask.
 - Never invent a workflow, expose a server-side skill id as an option, or set
   `classification_complete: true` without an explicit `workflow`.
 
