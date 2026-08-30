@@ -75,15 +75,18 @@ response shape:
   "skills":    [{ "id", "name", "description", "scope",
                   "default_confirmation", "applicable_expression",
                   "complexity_class", "complexity_task_type",
-                  "needs", "required_capabilities", "skill_relevance_hint" }, ...],
+                  "needs", "consumes", "produces",
+                  "required_capabilities", "skill_relevance_hint" }, ...],
   "workflows": [{ "id", "name", "description", "scope" }, ...],
   "caller":    {
     "orgRole", "orgId", "userId", "tier",
     "teams": [{ "id", "name", "description" }, ...]
   },
+  "capabilities": [{ "id", "label", "consuming", "producing" }, ...],
   "field_schema": {
     "workflow_preset": [ /* manifest entries — see Step 4 */ ],
-    "preset_step":     [ /* manifest entries — see Step 4 */ ]
+    "preset_step":     [ /* manifest entries — see Step 4 */ ],
+    "new_skill":       [ /* manifest entries — see Step 4 */ ]
   }
 }
 ```
@@ -315,6 +318,47 @@ purpose based on its `name`, `description`, and (if drafted) its
 `instructions`. Render the proposal as part of the per-skill summary
 so the admin sees what was inferred and can change it in the same
 edit pass — do not silently set the value.
+
+### Capabilities: what a skill READS beyond its own inputs
+
+`catalog.capabilities` lists what this server can feed a skill at run
+time. Each entry carries an `id`, a `label`, and a `consuming`
+sentence saying when declaring it applies. A skill declares them in
+`consumes` (and, rarely, `produces`).
+
+This matters most for skills that read **requirements**. Forge records
+where each repository actually keeps its specs, acceptance criteria
+and ADRs — some orgs use the project tracker, some keep them in-tree
+under a folder their admin declared. A skill that declares
+`consumes: ["intent_source"]` is told which, for the repo in hand,
+plus the root to read from and a check to run before trusting it. A
+skill that does not declare it gets no such guidance and will fall
+back to the tracker, silently, even for an org that told Forge
+otherwise.
+
+So when a drafted skill's instructions say anything like "read the
+spec", "check the acceptance criteria", "find the requirements" or
+"consult the ADR", propose `consumes: ["intent_source"]` and say why
+in one line — the same way you propose an SDLC stage. Do not set it
+silently, and do not add it to a skill that only writes, asks
+questions, or routes.
+
+Two rules:
+
+- **Take ids from `catalog.capabilities` — never invent one.** An id
+  this server does not recognise is rejected at save (Step 10). That
+  is deliberate: a declaration the orchestrator cannot resolve would
+  be ignored at run time, leaving a skill that reads as
+  capability-aware and is not.
+- **`produces` is not the mirror of `consumes`.** Declare it only when
+  the skill genuinely reports the payload named in that entry's
+  `producing` sentence. Most skills leave it empty.
+
+When an admin **overrides a system skill**, carry the baseline
+skill's `consumes` and `produces` across unless they explicitly want
+them dropped — the same rule as `needs`. An override that loses them
+resolves with no capabilities and quietly does less than the skill it
+replaced.
 
 ### SDLC stage: propose one for the WORKFLOW too, not just its skills
 
@@ -692,7 +736,7 @@ envelope, explain it plainly and offer to adjust:
 | Error code                | What it means                                  | Offer                                     |
 |---------------------------|------------------------------------------------|-------------------------------------------|
 | `admin_required`          | Caller is not an org admin                     | STOP — not recoverable in this session     |
-| `invalid_request`         | Payload failed schema validation               | Show `field` (and `step_index` if present), fix the value, retry |
+| `invalid_request`         | Payload failed schema validation               | Show `field` (and `step_index` if present), fix the value, retry. When `field` is `new_skills.consumes` / `new_skills.produces` the envelope also carries `unknown_capabilities` and `authorable_capabilities` — replace the invented id with one from that list, or drop the declaration |
 | `team_not_in_org`         | Team scope but the supplied `team_id` does not belong to the caller's org | Pick a team in your own org, or use org scope |
 | `team_not_found`          | `team_name` did not match any team in the org  | Show `available_teams` and ask which to use |
 | `team_store_unavailable`  | `team_name` used but team store is not wired   | Ask the admin to pass `team_id` directly  |
