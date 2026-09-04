@@ -26,6 +26,8 @@
  *      - snoozed wake check (session_observer writes this)
  *
  * Execution order (first match wins):
+ *   0. Seed the git baseline (SHI-906) — silent, once per session, before
+ *      any of the routing below and before this turn's work happens
  *   1. Linked → silent (already tracked, no directive needed)
  *   2. Active workflow → emit continuation directive
  *   3. Epic key in prompt → emit epic-key routing directive
@@ -40,6 +42,7 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { readHeadRef } = require('./git-head.cjs');
 
 // -- Detection patterns ------------------------------------------------------
 
@@ -62,8 +65,8 @@ function emitWakeConditionCheck(wakeCondition) {
 }
 
 function emitEpicKeyRouting(key) {
-  // Advisory tone (was forced "MUST invoke"). The orchestrator
-  // now handles cited-reference disambiguation via `needsKeyConfirmation`,
+  // Advisory tone (was forced "MUST invoke"). The server now handles
+  // cited-reference disambiguation via `needsKeyConfirmation`,
   // so the hook no longer needs to force the routing path. The hint
   // remains because it's the structural signal that nudges Claude away
   // from grabbing the work item directly via tracker MCP tools when
@@ -122,6 +125,23 @@ async function main() {
   // sessions in the same directory each track their own workflow.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
+
+  // Step 0 (SHI-906): seed the git baseline BEFORE this turn's work happens.
+  // stop-observer.cjs detects a commit by comparing HEAD against this value
+  // after the turn. Seeded there — at the first Stop — a commit made during
+  // turn 1 became the baseline itself and was never a milestone, which is
+  // the high-intent moment AC2 exists to catch. Ownership is split: this
+  // hook ESTABLISHES the baseline once, the Stop hook ADVANCES it whenever a
+  // milestone is consumed, so nothing here touches a value already set.
+  // Outside a repository readHeadRef is null and the field stays null; the
+  // cost is a few bounded stat calls per prompt, no subprocess.
+  if (!state.git_head_baseline) {
+    const head = readHeadRef(process.cwd());
+    if (head) {
+      sessionState.write({ git_head_baseline: head });
+      state.git_head_baseline = head;
+    }
+  }
 
   // Re-arm the session observer on each new turn when it's safe to do so.
   //

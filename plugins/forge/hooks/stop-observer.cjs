@@ -81,6 +81,7 @@
 const sessionStateModule = require('./session-state.cjs');
 const { resolveSessionRecords, captureTokenUsageFromResolved } = require('./token-usage.cjs');
 const { activeMsFromResolved } = require('./active-time.cjs');
+const { readHeadRef } = require('./git-head.cjs');
 
 // -- Constants ----------------------------------------------------------------
 
@@ -96,6 +97,50 @@ const FLUSH_INTERVAL = 3;      // turns between checkpoints when skill invocatio
 // smaller = better crash resilience / tighter granularity, larger = fewer
 // silent forced-continuation turns (lower token overhead).
 const TIME_FLOOR_MS = 10 * 60 * 1000; // 10 minutes
+
+// SHI-906: eligibility floor for the FIRST nudge of a session. The observer
+// used to become eligible at the end of turn 1, before there was any signal
+// about what the session was even about, so it read as onboarding noise —
+// and because a dismissal was terminal, that one bad impression was also the
+// last one. These hold it back until the session has actually produced
+// something to talk about. Tunable: smaller = the offer arrives sooner but
+// on thinner evidence, larger = fewer interruptions but more missed moments.
+// Deliberately lower than the checkpoint constants above: this is "has
+// anything happened yet", not "how often should we bank time".
+const TURN_FLOOR = 4;                    // turns before the first nudge is eligible
+const ACTIVE_FLOOR_MS = 5 * 60 * 1000;   // ...or this much ACTIVE working time
+
+/**
+ * Has HEAD moved since this session was first observed?
+ *
+ * The baseline is normally seeded by prompt-router.cjs on the session's
+ * FIRST PROMPT — before any work has happened — so a commit made during
+ * turn 1 is already a difference by the time this runs. Seeding here is the
+ * fallback for a session whose prompt hook never ran (older state, a hook
+ * that failed): the first sighting SEEDS and reports no milestone, because
+ * treating it as one would fire the nudge on turn 1 of every repo session —
+ * reintroducing exactly the noise the eligibility floor removes.
+ *
+ * The read itself lives in git-head.cjs, shared with the prompt hook.
+ */
+function milestoneReached(state, sessionState) {
+  const head = readHeadRef(process.cwd());
+  if (!head) return false;
+  if (!state.git_head_baseline) {
+    sessionState.write({ git_head_baseline: head });
+    return false;
+  }
+  if (head === state.git_head_baseline) return false;
+  // ADVANCE the baseline when a milestone is consumed. Leaving it stale
+  // would make one commit justify every subsequent check for the rest of
+  // the session — harmless while the nudge fires only once, but SHI-907
+  // lets a soft decline bring the offer back, and a permanently-true
+  // milestone would re-fire it on every Stop from then on. That is the
+  // over-prompting the error-handling NFR explicitly ranks as worse than
+  // a missed offer.
+  sessionState.write({ git_head_baseline: head });
+  return true;
+}
 
 // -- Directives ---------------------------------------------------------------
 
@@ -193,11 +238,38 @@ function buildCheckpointResponse(durationMs, state, stateFilePath, event, resolv
 // skill. Keeping this short matters
 // because some clients (Codex, Cursor) surface the Stop-hook block reason to
 // the user verbatim, where the old ~30-line block read as noise.
-function buildBlockResponse(stateFilePath) {
+function buildBlockResponse(stateFilePath, turnCount = null, activeMs = null, declinedOnce = false) {
+  // SHI-906 AC3: the nudge's "why now" must match how long the session has
+  // ACTUALLY been running. The eligibility gate already computed both
+  // figures to make its decision, so they are threaded through here rather
+  // than re-derived — a separately-computed number could disagree with the
+  // one that opened the gate, which is precisely the inconsistency the AC
+  // is about. Omitted (null) from the snooze re-fire path, where the
+  // session's elapsed figures are not the reason the offer is returning.
+  // Some clients surface this copy verbatim, so it has to read as prose:
+  // singular at 1 (a git milestone can open the gate on turn 1), and no
+  // "0 minutes" clause when active time rounds down to nothing.
+  const minutes = Number.isFinite(activeMs) && activeMs > 0 ? Math.round(activeMs / 60000) : 0;
+  const elapsed = [
+    Number.isFinite(turnCount) ? `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}` : null,
+    minutes >= 1 ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} of active work` : null,
+  ].filter(Boolean).join(' and ');
+  const context = elapsed
+    ? `This session has been going for ${elapsed}. Say so if you explain why you are checking in now. `
+    : '';
+  // SHI-907 AC4: a re-offer after a soft decline must not repeat the first
+  // one verbatim. The user already said no once; asking again in identical
+  // words reads as not having listened — and since a soft decline and a
+  // snooze now behave alike, this copy is the only difference they can
+  // actually perceive.
+  const reoffer = declinedOnce
+    ? `The user already declined this once in this session, so do NOT repeat the earlier offer word for word: `
+      + `open by acknowledging that, say briefly what has changed since, and keep it shorter than the first. `
+    : '';
   return JSON.stringify({
     decision: 'block',
     reason:
-      `FORGE OBSERVATION: Before stopping, decide whether this session involved any product ` +
+      `FORGE OBSERVATION: ${context}${reoffer}Before stopping, decide whether this session involved any product ` +
       `or engineering work across the software development lifecycle (SDLC) — defining, planning, ` +
       `building, testing, reviewing, or discussing code or features (reading or analyzing code to ` +
       `understand it counts). If it did, you MUST invoke the "forge-autopilot" skill via the Skill ` +
@@ -373,7 +445,7 @@ async function main() {
   // engineering-time tracking on already-tracked sessions continues
   // independently of the observation toggle — the toggle gates the
   // initial nudge, not silent checkpoints on linked/logged work.
-  // Field name shared verbatim with the Cursor parity.
+  // Field name shared verbatim with the Cursor build (parity).
   //
   // This cache is intentionally per-session (not cross-session): each new
   // Claude Code / Codex / Cursor session starts with a fresh state file, so
@@ -390,14 +462,26 @@ async function main() {
     // Reset state so observer can re-prompt the user. Also reset
     // observer_fired so the per-session "fire once" counter restarts —
     // the user explicitly asked to be re-prompted by snoozing.
+    //
+    // SHI-907: `declined_once` is deliberately NOT cleared here. It is what
+    // lets the returning offer acknowledge that the user already said no
+    // rather than repeating itself verbatim (AC4). A soft decline reaches
+    // this same branch — that reuse is the whole point of the design, since
+    // both planes already speak the snooze contract end to end and adding a
+    // parallel status would fail invisibly across the plane boundary.
     sessionState.write({
       observer_blocked: false,
       observer_fired: false,
       status: null,
       last_observer_turn: state.turn_count,
     });
-    // Block with the standard observer directive
-    process.stdout.write(buildBlockResponse(sessionState.stateFilePath));
+    // Block with the observer directive. The elapsed figures are omitted:
+    // the reason this offer is BACK is the earlier decline, not how long
+    // the session has run, so quoting a duration here would answer a
+    // question the user did not ask.
+    process.stdout.write(buildBlockResponse(
+      sessionState.stateFilePath, null, null, Boolean(state.declined_once),
+    ));
     return;
   }
 
@@ -415,6 +499,38 @@ async function main() {
   // Step 7: Already blocked once this session — don't re-block
   if (state.observer_blocked) return;
 
+  // Step 7b: Eligibility floor — real signal must exist before the FIRST
+  // nudge of a session (SHI-906 AC1/AC2).
+  //
+  // PLACEMENT IS LOAD-BEARING. This sits AFTER Step 7's observer_blocked
+  // check and BEFORE Step 8's write. Moved below that write, the one-shot
+  // latch trips on turn 1 and the session is permanently spent WITHOUT ever
+  // nudging — strictly worse than the bug this fixes, and silent: the user
+  // simply never sees the offer again and nothing is logged anywhere. The
+  // test `suppressing a turn must NOT consume the session's one-shot
+  // eligibility` in stop-observer-eligibility.test.js exists to catch that.
+  //
+  // Fires on turns OR active time OR a git milestone, mirroring the
+  // either/or shape of the checkpoint gate in Step 3 above.
+  //
+  // The active-time read deliberately does NOT fall back to wall-clock the
+  // way Step 3 does. Where the transcript is unreadable — which is always
+  // the case on Cursor — a session left open for hours with a single turn
+  // would otherwise become eligible on elapsed time alone, which is exactly
+  // the noise AC1 removes. It degrades to TURNS ONLY.
+  //
+  // Everything here is inside main()'s catch, so a fault in the new logic
+  // fails toward silence rather than toward prompting — the asymmetry the
+  // error-handling NFR asks for.
+  const hasTurns = state.turn_count >= TURN_FLOOR;
+  const eligibilityActiveMs = activeMsFromResolved(
+    resolveSessionRecords(event),
+    new Date(state.session_start).getTime(),
+  );
+  const hasActiveTime = Number.isFinite(eligibilityActiveMs)
+    && eligibilityActiveMs >= ACTIVE_FLOOR_MS;
+  if (!hasTurns && !hasActiveTime && !milestoneReached(state, sessionState)) return;
+
   // Step 8: Mark as blocked so we don't fire again on the same turn, AND
   // mark observer_fired so prompt-router.cjs preserves the "fire once" UX
   // on subsequent turns (the workflow-completion clear path keys off
@@ -422,8 +538,22 @@ async function main() {
   // observer never fired" case, not the "observer fired, user ignored it" case).
   sessionState.write({ observer_blocked: true, observer_fired: true });
 
-  // Step 9: Block Claude's exit and direct it to evaluate the session
-  process.stdout.write(buildBlockResponse(sessionState.stateFilePath));
+  // Step 9: Block Claude's exit and direct it to evaluate the session.
+  // Pass the SAME figures the eligibility gate used (SHI-906 AC3).
+  //
+  // `declined_once` has to be threaded here too, not only on Step 4's
+  // re-fire path. Step 4 writes `status: null` when it re-offers, so the
+  // NEXT Stop no longer matches Step 4 and arrives HERE instead. Omitting
+  // the flag meant the second and every later re-offer silently reverted to
+  // the original first-offer wording — the exact "asked again as if it had
+  // never asked" behaviour SHI-907 AC4 exists to prevent, and invisible
+  // because the copy still reads perfectly well on its own.
+  process.stdout.write(buildBlockResponse(
+    sessionState.stateFilePath,
+    state.turn_count,
+    eligibilityActiveMs,
+    Boolean(state.declined_once),
+  ));
 }
 
 main().catch(() => {

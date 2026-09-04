@@ -126,8 +126,22 @@ function freshState(sessionId) {
     session_start: new Date().toISOString(),
     turn_count: 0,
     nudge_shown: false,
-    status: null,          // null | "snoozed" | "dismissed" | "linked" | "logged"
+    // null | "snoozed" | "dismissed" | "linked" | "logged".
+    // SHI-907: a soft decline ("not this one") is persisted AS "snoozed" so
+    // the existing re-fire path picks it up unchanged; only the audit
+    // `outcome` distinguishes it from an explicit snooze. "dismissed"
+    // remains terminal and means "stop asking".
+    status: null,
     wake_condition: null,
+    // SHI-907: set when the user softly declines the observer offer. NOT
+    // cleared by the snooze re-fire, so a returning offer can acknowledge
+    // the earlier "no" instead of repeating itself verbatim (AC4).
+    declined_once: false,
+    // SHI-906: HEAD sha (or ref name) seen when this session was first
+    // observed inside a repository. The git-milestone eligibility route in
+    // stop-observer.cjs seeds it on first sight and advances it whenever a
+    // milestone is consumed; null until then, and forever outside a repo.
+    git_head_baseline: null,
     routing_emitted: false,
     active_workflow: false,
     observer_blocked: false,
@@ -170,7 +184,7 @@ function freshState(sessionId) {
     // of the active-time window it stamps onto forge__update_state's
     // duration_ms. null until the first step begins.
     step_active_since: null,
-    // ── forge_observation_enabled ──────────────────────────────────────
+    // ── observation gate contract: forge_observation_enabled ───────────
     // Per-Claude-Code-session cache of the org-admin's observation
     // toggle (Clerk publicMetadata.forgeObservationEnabled, surfaced
     // on the MCP side as context.org_settings.forgeObservationEnabled).
@@ -191,7 +205,7 @@ function freshState(sessionId) {
     // logic on either side. Admin toggles take effect at the next
     // Claude Code session start (which begins with a fresh state file).
     // Field name shared verbatim with the Cursor stop-observer.cjs
-    // parity — do NOT rename without coordinating both halves.
+    // (parity) — do NOT rename without coordinating both halves.
     forge_observation_enabled: null,
   };
 }
