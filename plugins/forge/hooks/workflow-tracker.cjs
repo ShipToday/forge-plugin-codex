@@ -206,6 +206,17 @@ const OUTCOME_TO_STATUS = {
   ad_hoc: 'logged',
   snoozed: 'snoozed',
   dismissed: 'dismissed',
+  // SHI-907: a SOFT decline. Distinct from `dismissed`, which stays
+  // terminal. Mapped to the `snoozed` status because both planes already
+  // speak that vocabulary end to end — the re-fire branch in
+  // stop-observer.cjs and the wake check in prompt-router.cjs both read it.
+  // Introducing a new status value instead would have to cross the
+  // schema-free final_session_state boundary, where the validation below is
+  // ONE-DIRECTIONAL: an unrecognised value is silently dropped to this map
+  // rather than raising, so the mistake would never surface. The two
+  // outcomes stay separable in the audit trail via `outcome`, which is what
+  // AC3 actually needs; only the local session STATUS is shared.
+  declined_for_now: 'snoozed',
 };
 
 // The tracking statuses stop-observer.cjs recognises. A skill-declared
@@ -486,8 +497,20 @@ async function main() {
 
     const observerEvent = extractObserverEvent(event);
     if (observerEvent) {
-      const { status: observerStatus, sdlcStage } = observerEvent;
+      const { status: observerStatus, outcome: observerOutcome, sdlcStage } = observerEvent;
       const statusUpdates = {};
+      // SHI-907: a soft decline is DERIVED from the outcome here rather than
+      // read from a field on final_session_state. That is not a stylistic
+      // choice — `extractObserverEvent` returns only { status, outcome,
+      // sdlcStage }, so any other key the skill puts on final_session_state
+      // is silently discarded on this side of the plane boundary. A
+      // `declined_once` sent across directly would simply never arrive, with
+      // no error at either end, and AC4's acknowledging re-offer would
+      // quietly never fire. The outcome already crosses validated, so the
+      // client-local flag is computed from it instead.
+      if (observerOutcome === 'declined_for_now') {
+        statusUpdates.declined_once = true;
+      }
       // Status-carrying outcomes (ad_hoc → logged, snoozed, dismissed) set the
       // tracking status and advance the checkpoint baseline. Stage-only
       // outcomes (linked/created) carry no status mapping — they persist the
