@@ -244,7 +244,8 @@ user has answered are:
 
 - user-input tool or direct user question — relay the pending question
 - `forge__update_state` — advance with the user's answer
-- `forge__abandon_workflow` — exit cleanly (see below)
+- `forge__abandon_workflow` — exit when the workflow no longer applies (see
+  below; it is not a way to end a run early)
 - Read-only inspection: filesystem reads, search, web fetch/search when
   available, plus read-only MCP tools (names starting with `list_`, `get_`,
   `search_`, `query_`, `fetch_`, `notion-search`, `notion-fetch`)
@@ -275,8 +276,15 @@ silently rewrite the ticket.
 
 Anything denied gets an actionable reason that points at the three
 legitimate next moves: relay the user question, advance
-(`forge__update_state`), or abandon (`forge__abandon_workflow`).
-This makes silent-bypass structurally impossible, not just discouraged.
+(`forge__update_state`), or abandon (`forge__abandon_workflow` — only when
+the workflow itself no longer applies). This makes silent bypass hard to do
+by accident. It is not a security boundary: `forge__abandon_workflow` is
+always allowed, and a host that wraps MCP calls may not expose every call
+to the hook.
+
+If you receive a deny decision for a tool you genuinely need, the right
+move is usually to advance the workflow — the next step's allowlist
+likely includes the tool you want.
 
 If you receive a deny decision for a tool you genuinely need, the right
 move is usually to advance the workflow — the next step's allowlist
@@ -362,6 +370,13 @@ the classifier picked the wrong workflow, or scope changed mid-stream — call
 conversation. This is the **only** correct way to exit a workflow without
 completing it.
 
+- **Not for ending a run early.** When a post-step confirmation gate is
+  pending it already offers **Stop here**, which ends the run, keeps
+  everything produced, and records which steps did not run. Relay that gate
+  and let the user choose. Deciding on your own that the remaining steps are
+  unnecessary is not a reason to abandon — an abandon at a gate is recorded
+  as such in the audit trail, and the recap names the steps that did not
+  run.
 - **Do NOT silently bypass** the workflow by skipping `forge__update_state`
   calls and proceeding directly with implementation. Silent bypass leaves
   the audit trail blind to *why* the workflow stopped applying — the team
@@ -439,6 +454,53 @@ check** flags the remaining work as a pre-computed replay (content already in
 workflow state, no new generation), in which case run it inline regardless of
 tier.
 
+### Independence: a different question from tier
+
+Tier asks "is this model strong enough?". It does not ask "should the reviewer
+be someone who has already seen this work?" — and for a step whose job is to
+**judge** an artifact, that second question is often the one that decides
+quality. A reviewer who produced the work reads what they *meant* to write; a
+reviewer with no prior exposure reads what is actually there.
+
+Each step's advisory carries an **Independence check** above its delegation
+rules. Settle it first, because the rules would answer it wrongly: "I'm already
+on the right tier" and "I already hold the context" both point at running
+inline, and on a review step holding the author's context is the
+disqualification, not the qualification.
+
+The check is a test you apply to the step in front of you — Forge does not
+pre-label which steps are reviews, because your org's own workflows and skills
+count too. It also covers judging your own *conclusions*, not just your own
+code: confirming a root cause you hypothesised earlier in the run is the same
+failure mode, and a more expensive one, since the whole fix gets built on it.
+
+When it comes out yes, three things matter:
+
+- **Give away the judgment, keep the step.** Hand the fault-finding to the
+  fresh agent; keep the mechanical checks, the rendering, and — when the step
+  ends in a gate or relayed question — the gate and the `forge__update_state`
+  hand-off. Delegating a gated step whole forces the sub-agent to relay the
+  entire envelope back to you, which is the most fragile part of the contract.
+  A split prompt is **not** the standard payload — see rule 4 below.
+- **Check that "fresh" is actually fresh.** On some hosts a spawned sub-agent
+  inherits the parent conversation by default, so calling it fresh does not
+  make it so — an agent holding your reasoning will confirm you, and it costs
+  more than an isolated one. If your sub-agent tool has a context/history
+  parameter, set it to inherit nothing. Forge's per-step advisory names the
+  exact parameter where it knows it.
+- **Reuse the reviewer, never the author.** Do not resume an agent that helped
+  build the thing. Do resume the independent reviewer you already spawned this
+  run — it is still independent, and it saves re-reading the same diff on every
+  review step. A run with three judgments over one diff should pay one cold
+  read, not three.
+- **Brief it with the artifact and the standard, never your conclusions**, and
+  surface what it found before you reconcile it. Knowing what you meant to
+  write is not evidence that the code does it.
+
+When you cannot spawn one, run it inline and label it: *"Reviewed on my own
+context — this is a self-review."* A self-review is a fine outcome; a
+self-review that reads as an independent one is not.
+
 ### Rules
 
 1. **Always check** — if `**Model Routing**` is present, evaluate it before
@@ -447,8 +509,15 @@ tier.
    strongest available model; if it says "fast", use your lightweight model
 3. **Announce delegation** — briefly tell the user before delegating
    (e.g., "Delegating to a balanced model for this step...")
-4. **Pass the full prompt** — everything below `---DELEGATE BELOW---` in the
-   instructions is the delegated prompt. Include all of it
+4. **Pass the full prompt — when the WHOLE step goes over** — everything below
+   `---DELEGATE BELOW---` is the delegated prompt; include all of it. **If you
+   are splitting the step instead** (handing over a judgment per the
+   independence check, or a bounded read per the step's rule 5), do NOT forward
+   the `STEP BOUNDARY` directive: that is what makes a sub-agent call
+   `forge__update_state` and advance, which rotates the `step_token` out from
+   under your own call for the same step. Send the artifact, the standard and
+   the analysis portion only, and tell it to return findings as text and call
+   no `forge__` tool
 5. **Everything ABOVE the delimiter stays with you** — it is addressed to the
    parent, not the sub-agent. In particular, a `<<<FORGE_DISPLAY_VERBATIM …>>>`
    block above the delimiter is content **for the user** (the "Step N of M"
@@ -538,10 +607,10 @@ once plan mode releases you to act.
 because plan mode is active. If you've called `forge__start_workflow` and
 read the step instructions, complete the read-only portions and present
 the deferred writes in your plan — do not pivot to a parallel
-plan-mode-only investigation that ignores the workflow. Abandoning leaves
-the session's `active_workflow` flag stuck (workflow-tracker.cjs only
-clears it on completion), which causes every subsequent prompt to receive
-a stale "A Forge workflow is active and waiting for user input" reminder.
+plan-mode-only investigation that ignores the workflow. Abandoning closes
+the run for good: the steps that had not run are recorded as not run, the
+audit trail records the abandonment, and nothing resumes it — the user has
+to start over.
 
 ## What NOT to route
 
