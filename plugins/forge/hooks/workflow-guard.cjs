@@ -358,7 +358,8 @@ function buildCheckpointDenyReason(state, toolName) {
     'You have three options:',
     '  1. Call AskUserQuestion to relay the pending question to the user.',
     '  2. Call forge__update_state with the user\'s answer (set state_updates.user_answer).',
-    '  3. Call forge__abandon_workflow with a meaningful reason if the workflow no longer applies.',
+    '  3. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
+    '     Never abandon to skip the remaining steps: a post-step confirmation gate already offers the user "Stop here" for that — relay it.',
     ``,
     'Do NOT silently bypass the workflow. The audit trail is how the team learns when workflows misroute.',
   ];
@@ -375,7 +376,8 @@ function buildStepPermissionDenyReason(state, toolName, category) {
     'Likely you are trying to do work that belongs to a later step. Options:',
     '  1. Continue the current step and call forge__update_state to advance — the next step may allow this tool.',
     '  2. Call AskUserQuestion if the user needs to make a decision before this step can complete.',
-    '  3. Call forge__abandon_workflow with a meaningful reason if the workflow no longer applies.',
+    '  3. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
+    '     Never abandon to skip the remaining steps: a post-step confirmation gate already offers the user "Stop here" for that — relay it.',
     ``,
     'Do NOT silently bypass the workflow. The audit trail is how the team learns when workflows misroute.',
   ];
