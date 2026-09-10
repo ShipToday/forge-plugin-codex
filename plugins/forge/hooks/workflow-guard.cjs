@@ -218,6 +218,10 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'forge__send_feedback',
   // Question relay — the only way for the model to talk to the user mid-step
   'AskUserQuestion',
+  'request_user_input',
+  'request_user_input_async',
+  'functions.request_user_input',
+  'functions.request_user_input_async',
   // Claude Code primitives — read-only or local-only, cannot mutate external state
   'Read',
   'Grep',
@@ -244,7 +248,7 @@ const READONLY_PREFIXES = ['list_', 'get_', 'search_', 'query_', 'fetch_', 'read
 
 const CATEGORY_PATTERNS = {
   read_code:    [/^Read$/, /^Grep$/, /^Glob$/],
-  ask_user:     [/^AskUserQuestion$/],
+  ask_user:     [/^AskUserQuestion$/, /^(?:functions\.)?request_user_input(?:_async)?$/],
   web:          [/^WebFetch$/, /^WebSearch$/],
 
   tracker_read: [
