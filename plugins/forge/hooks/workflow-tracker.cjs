@@ -131,7 +131,7 @@ function isWorkflowAbandoned(response) {
 function extractPendingCheckpointStep(response) {
   if (!response) return null;
   const text = responseText(response);
-  const match = text.match(/\*\*CHECKPOINT\*\*\s+—\s+"([^"]+)"\s+(?:awaiting user input|paused at confirmation gate)/);
+  const match = text.match(/\*\*CHECKPOINT\*\*\s+—\s+"([^"]+)"\s+(?:awaiting user input|question unresolved|report complete; optional follow-up|paused at confirmation gate)/);
   return match ? match[1] : null;
 }
 

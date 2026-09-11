@@ -237,10 +237,8 @@ After calling `start_workflow`, Forge returns step-by-step instructions.
 Follow them:
 
 1. Execute each step as instructed
-2. When a step says to ask the user a question, ask the user directly. If a
-   structured user-input tool is available, use it as the only tool call in
-   that response, then wait for the answer before continuing.
-3. If the answer is empty (Skip button), record "TBD" and move on
+2. Follow the returned question-delivery instructions. Forge may deliver a native MCP form and return the answered step directly; do not ask the same question again after RE-ENTRY. Otherwise use only a question tool available and permitted by this host. In Codex, `request_user_input_async` takes `questions: [{title, options: [string, ...]}]`; use `request_user_input` only when the current mode permits it. Use Claude's `AskUserQuestion` only when that host provides it. When no permitted tool fits, ask the concise free-text question in the host's allowed format.
+3. An async `{accepted:true}` means submitted, not displayed or answered. Wait for the actual later user message before dependent work. Preserve the question ID, step token, option order and labels. Post the actual answer through the returned `user_answer` or `gate_answer` path. Never convert dismissal, failure, empty input or a preselected default into `TBD` or approval. Keep the decision identifiable to the user. Read-only recovery does not re-present; use `question_resume: true` with the returned identity on an explicit resume.
 4. After completing each step, call `forge__update_state` with the results
    AND the `step_token` from the most recent response (see below)
 5. If Forge returns `needsDisambiguation` or `needsIntentClassification`,
