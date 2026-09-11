@@ -301,20 +301,24 @@ async function main() {
     return; // Malformed input — exit silently.
   }
 
-  const sessionState = sessionStateModule.forSession(event.session_id);
+  // Codex: the dedup fingerprint lives in a sidecar next to the state file,
+  // not inside it. This hook and workflow-tracker.cjs fire on the SAME
+  // PostToolUse event, and two read-modify-write cycles on one file can lose
+  // updates. One writer per file.
+  const sidecar = `${sessionStateModule.forSession(event.session_id).stateFilePath}.display`;
 
   let last = null;
   try {
-    last = sessionState.read().last_display_fingerprint || null;
+    last = fs.readFileSync(sidecar, 'utf8').trim() || null;
   } catch {
-    last = null; // A missing/corrupt state file must not suppress the display.
+    last = null; // A missing/corrupt sidecar must not suppress the display.
   }
 
   const result = decide(event, last);
   if (!result.systemMessage) return;
 
   try {
-    sessionState.write({ last_display_fingerprint: result.fingerprint });
+    fs.writeFileSync(sidecar, result.fingerprint, 'utf8');
   } catch {
     // Persisting dedup state is best-effort; showing the block is not.
   }

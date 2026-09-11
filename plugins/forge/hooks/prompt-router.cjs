@@ -1,48 +1,22 @@
 #!/usr/bin/env node
 
 /**
- * prompt-router.js — UserPromptSubmit hook for the ShipToday Forge plugin.
- *
- * Mostly stateful routing — content-based pattern matching for SDLC
- * vocabulary (PRD, story breakdown, tech handoff, etc.) has been removed.
- * The LLM decides whether to invoke `forge-autopilot` for those cases
- * via its SKILL.md description.
- *
- * The hook fires for two things the LLM cannot reliably decide on its own:
- *
- *   1. **Epic key references** (e.g. "explore architecture of PROJ-615").
- *      Skill discovery is a soft signal and Claude can choose to bypass
- *      Forge when it has alternative tools (Linear MCP, Read, Grep) that
- *      look usable. A regex match on a tracked work item id is a strong
- *      structural signal and gets an ADVISORY routing directive — a hint
- *      that surfaces the key and recommends Forge, but yields agency to
- *      Claude when the conversation context warrants a different route.
- *      The regex is purely structural — it knows nothing
- *      about workflows or skills, so adding new ones requires no changes
- *      here.
- *
- *   2. **Stateful routing** for things stored on disk by other hooks:
- *      - active workflow continuation (workflow-tracker writes this)
- *      - snoozed wake check (session_observer writes this)
- *
- * Execution order (first match wins):
- *   0. Seed the git baseline (SHI-906) — silent, once per session, before
- *      any of the routing below and before this turn's work happens
- *   1. Linked → silent (already tracked, no directive needed)
- *   2. Active workflow → emit continuation directive
- *   3. Epic key in prompt → emit epic-key routing directive
- *   4. Snoozed → emit wake check
- *   5. Otherwise → silent (let the LLM decide via SKILL.md description)
- *
- * @see plugin/hooks/session-state.cjs for state management
- * @see plugin/hooks/stop-observer.cjs for passive observation
- * @see plugin/skills/forge-autopilot/SKILL.md for routing logic
+ * Codex UserPromptSubmit routing. Required workflow continuation comes first.
+ * Explicit work-item routing and queued passive developer context are then
+ * delivered TOGETHER in one additionalContext payload, so a prompt that
+ * mentions a work item can never starve a queued checkpoint or offer. Linked
+ * sessions stay silent on key routing (as in the Claude Code plugin — the work
+ * is already tracked) but still receive their passive context. Stop schedules
+ * observation/checkpoints locally; a snoozed session gets a short per-prompt
+ * wake check from passive-observation.cjs.
+ * Preserve this Codex adaptation during plugin synchronization.
  */
 
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
 const { readHeadRef } = require('./git-head.cjs');
+const { deliver, additionalContext } = require('./passive-observation.cjs');
 
 // -- Detection patterns ------------------------------------------------------
 
@@ -53,18 +27,7 @@ const EPIC_KEY_RE = /\b[A-Z][A-Z0-9]+-\d+\b/;
 
 // -- Directive builders ------------------------------------------------------
 
-function emitWakeConditionCheck(wakeCondition) {
-  process.stdout.write(
-    `FORGE ROUTING: This session is snoozed. ` +
-    `Wake condition: "${wakeCondition}". ` +
-    `Evaluate if the user's current message signals readiness. ` +
-    `If yes, you MUST invoke the "forge-autopilot" skill via the Skill tool BEFORE responding ` +
-    `with the input: "observe session — start the observe_session workflow for passive tracking". ` +
-    `If no, continue normally and do NOT mention this check to the user.`
-  );
-}
-
-function emitEpicKeyRouting(key) {
+function epicKeyRouting(key) {
   // Advisory tone (was forced "MUST invoke"). The server now handles
   // cited-reference disambiguation via `needsKeyConfirmation`,
   // so the hook no longer needs to force the routing path. The hint
@@ -72,7 +35,7 @@ function emitEpicKeyRouting(key) {
   // from grabbing the work item directly via tracker MCP tools when
   // Forge is the appropriate orchestrator — but final agency stays with
   // Claude when the conversation context warrants a different choice.
-  process.stdout.write(
+  return (
     `FORGE ROUTING (advisory): The user's message references work item "${key}". ` +
     `Consider invoking the "forge-autopilot" skill via the Skill tool — Forge orchestrates ` +
     `the SDLC actions (planning, implementation, review, status) for tracked work items, ` +
@@ -169,39 +132,37 @@ async function main() {
     state.observer_blocked = false; // keep local copy in sync for downstream checks
   }
 
-  // Step 1: Linked sessions need no directives — already tracked
-  if (state.status === 'linked') return;
-
   // Step 2: Active workflow → tell Claude to continue, not start fresh
   if (state.active_workflow) {
     emitWorkflowContinuation(state.conversation_id, state.current_skill);
     return;
   }
 
-  // Step 3: Epic key in prompt → forced routing directive (wins over
-  // snoozed/dismissed because the user is explicitly referencing tracked work).
-  // This is the only content-based signal the hook acts on. It catches the
-  // case where Claude would otherwise bypass Forge in favor of fetching the
-  // work item directly via Linear/Jira/etc.
-  if (prompt) {
+  const parts = [];
+
+  // Step 3: Epic key in prompt → advisory routing directive. This is the only
+  // content-based signal the hook acts on. It catches the case where Claude
+  // would otherwise bypass Forge in favor of fetching the work item directly
+  // via Linear/Jira/etc. A linked session is already tracked, so it gets no
+  // nudge (as in the Claude Code plugin) — its passive context still flows.
+  if (prompt && state.status !== 'linked') {
     const keyMatch = prompt.match(EPIC_KEY_RE);
     if (keyMatch) {
       sessionState.write({ routing_emitted: true });
-      emitEpicKeyRouting(keyMatch[0]);
-      return;
+      parts.push(epicKeyRouting(keyMatch[0]));
     }
   }
 
-  // Step 4: Snoozed → ask Claude to re-evaluate against the wake condition
-  if (state.status === 'snoozed') {
-    const wake = state.wake_condition || 'user signals readiness to move forward';
-    emitWakeConditionCheck(wake);
-    return;
-  }
+  // Codex localization: Stop only queues work. Deliver it once as developer
+  // context on a real prompt — alongside routing, never instead of it, so a
+  // work-item mention can't hold back a queued checkpoint whose time is
+  // already reserved.
+  const passive = deliver(sessionState, state, event);
+  if (passive) parts.push(passive);
 
   // Step 5: No state worth acting on → silent. The LLM reads the
-  // forge-autopilot SKILL.md description and decides whether to invoke
-  // it. stop-observer.cjs handles passive observation after the response.
+  // forge-autopilot SKILL.md description and decides whether to invoke it.
+  if (parts.length) process.stdout.write(additionalContext(parts.join('\n\n')));
 }
 
 main().catch(() => {

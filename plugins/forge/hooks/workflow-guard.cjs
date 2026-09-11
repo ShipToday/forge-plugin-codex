@@ -170,13 +170,14 @@ function codexSupportsUpdatedInput(event) {
   let supported = false;
   let version = null;
   try {
-    // shell:true on Windows so the `codex.cmd` npm shim resolves; the
-    // arguments are a fixed literal, so there is no injection surface.
-    const out = String(execFileSync('codex', ['--version'], {
-      timeout: 2000,
-      shell: process.platform === 'win32',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }));
+    // shell:true on Windows so the `codex.cmd` npm shim resolves. The whole
+    // command is one fixed literal there (no args array): Node 24 deprecates
+    // shell:true combined with an args array (DEP0190) and prints the warning
+    // to stderr, which in a hook is noise on every tool call. Either form has
+    // no injection surface — nothing here comes from input.
+    const out = String(process.platform === 'win32'
+      ? execFileSync('codex --version', [], { timeout: 2000, shell: true, stdio: ['ignore', 'pipe', 'ignore'] })
+      : execFileSync('codex', ['--version'], { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
     const v = parseVersionTriple(out);
     if (v) {
       version = v.join('.');
@@ -388,6 +389,27 @@ function buildStepPermissionDenyReason(state, toolName, category) {
   return lines.join('\n');
 }
 
+// Codex: a delivered passive checkpoint may be submitted at most once. The
+// server adds duration deltas without dedup, so a replay — typically after a
+// history summary makes the model re-read delivered_checkpoint from the state
+// file — double-counts engineering time. Match on the same identity the
+// tracker uses when it records processing (conversation + reserved duration).
+function checkpointReplayReason(state, event) {
+  let call = event.tool_input || {};
+  if (typeof call === 'string') { try { call = JSON.parse(call); } catch { return null; } }
+  let updates = call.state_updates || {};
+  if (typeof updates === 'string') { try { updates = JSON.parse(updates) || {}; } catch { return null; } }
+  if (call.completed_step !== 'session_observer' || updates.outcome !== 'checkpoint') return null;
+  const sent = state.delivered_checkpoint;
+  const receipt = state.checkpoint_delivery;
+  if (!sent || !receipt?.processed_at || receipt.id !== sent.id) return null;
+  if (call.conversation_id !== sent.conversation_id ||
+      updates.duration_ms !== sent.state_updates?.duration_ms) return null;
+  return `FORGE PASSIVE CHECKPOINT ${sent.id} was already recorded at ${receipt.processed_at}. ` +
+    `Do not resubmit it — duration deltas are added without server-side deduplication. ` +
+    `Continue the user's request; nothing further is needed for this checkpoint.`;
+}
+
 // -- Main -------------------------------------------------------------------
 
 async function main() {
@@ -450,6 +472,11 @@ async function main() {
   // (graceful no-capture, no breakage). Fail-soft: any parse/IO error leaves
   // the call unchanged — token capture must never block forge__update_state.
   if (bare === 'forge__update_state') {
+    const replay = checkpointReplayReason(state, event);
+    if (replay) {
+      process.stdout.write(JSON.stringify({ decision: 'deny', reason: replay }));
+      return;
+    }
     // Codex build: the stamp is delivered via updatedInput, which Codex only
     // honors from rust-v0.131.0 — bail BEFORE any capture work (rollout
     // parsing is wasted when the rewrite can't be delivered). See the gate's
@@ -475,8 +502,14 @@ async function main() {
       //   - duration_ms (R1 idle-excluded active time; active-workflow steps only).
       let changed = false;
       // Never clobber a token_usage the caller already set (defensive — the
-      // model does not set it today, but a future client might).
-      if (tokens && !stateUpdates.token_usage) {
+      // model does not set it today, but a future client might). The one
+      // exception is a Codex passive checkpoint: its token_usage is a snapshot
+      // frozen when stop-observer.cjs queued it, possibly many turns ago, so a
+      // capture taken now is strictly fresher (cumulative — the server keeps
+      // the larger value either way).
+      const passiveCheckpoint = toolInput.completed_step === 'session_observer'
+        && stateUpdates.outcome === 'checkpoint';
+      if (tokens && (!stateUpdates.token_usage || passiveCheckpoint)) {
         // Stamp one component bag PER model so the orchestrator
         // writes a per-model token_usage row — a delegated session (Opus main +
         // Sonnet sub-agent) is then weighted per model at read. Fall back to the
