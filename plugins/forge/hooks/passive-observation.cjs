@@ -43,10 +43,13 @@ function deliver(session, state, event) {
   if (state.passive_checkpoint_due) {
     const pending = state.passive_checkpoint_due;
     if (!UUID_RE.test(String(pending.id || ''))) { session.write({ passive_checkpoint_due: null }); return ''; }
+    // Upgrade an undelivered legacy queue safely; already-delivered id-less
+    // payloads are rejected by the guard because they cannot prove identity.
+    pending.state_updates = { ...pending.state_updates, codex_checkpoint_id: pending.id };
     session.write({ passive_checkpoint_due: null, delivered_checkpoint: pending,
       last_passive_prompt_turn: event.turn_id || null,
       skills_flushed_at_turn: pending.skills_through,
-      checkpoint_delivery: { id: pending.id, at, processed_at: null } });
+      checkpoint_delivery: { id: pending.id, at, attempted_at: null, processed_at: null } });
     return `FORGE PASSIVE CHECKPOINT: Read the existing forge-autopilot skill's ` +
       `Codex passive delivery instructions. Session state: ${JSON.stringify(session.stateFilePath)}. ` +
       `Process delivered_checkpoint ${pending.id} once in this active turn; preserve the user's substantive final answer.`;

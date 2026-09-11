@@ -80,7 +80,9 @@ async function main() {
     const resolved = resolveSessionRecords(event);
     const active = activeMsFromResolved(resolved, since, now);
     const delta = Math.max(0, Number.isFinite(active) ? active : now - since);
+    const checkpointId = old?.id || randomUUID();
     const updates = {
+      codex_checkpoint_id: checkpointId,
       outcome: 'checkpoint', event_type: 'observation_outcome',
       duration_ms: (old?.state_updates.duration_ms || 0) + delta,
       work_item_key: state.work_item_key || null, sdlc_stage: state.sdlc_stage || 'other',
@@ -102,7 +104,7 @@ async function main() {
     // Reserve interval and payload together; this is NOT a remote receipt.
     // Ambiguous calls aren't retried: the server adds deltas without dedup.
     session.write({
-      passive_checkpoint_due: { id: old?.id || randomUUID(), queued_at: old?.queued_at || at,
+      passive_checkpoint_due: { id: checkpointId, queued_at: old?.queued_at || at,
         through: at, skills_through: skills.length, conversation_id: state.last_observer_conversation_id,
         completed_step: 'session_observer', state_updates: updates },
       last_checkpoint_at: at, last_checkpoint_turn: state.turn_count, skills_reserved_through: skills.length,

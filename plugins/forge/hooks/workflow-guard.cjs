@@ -65,6 +65,8 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { stateCall } = require('./hook-input.cjs');
+const { claim } = require('./checkpoint-claim.cjs');
 const { resolveSessionRecords, captureTokenUsageFromResolved, resolveCodexRolloutPath } = require('./token-usage.cjs');
 const { activeMsFromEvent, activeMsFromResolved } = require('./active-time.cjs');
 const fs = require('fs');
@@ -389,27 +391,6 @@ function buildStepPermissionDenyReason(state, toolName, category) {
   return lines.join('\n');
 }
 
-// Codex: a delivered passive checkpoint may be submitted at most once. The
-// server adds duration deltas without dedup, so a replay — typically after a
-// history summary makes the model re-read delivered_checkpoint from the state
-// file — double-counts engineering time. Match on the same identity the
-// tracker uses when it records processing (conversation + reserved duration).
-function checkpointReplayReason(state, event) {
-  let call = event.tool_input || {};
-  if (typeof call === 'string') { try { call = JSON.parse(call); } catch { return null; } }
-  let updates = call.state_updates || {};
-  if (typeof updates === 'string') { try { updates = JSON.parse(updates) || {}; } catch { return null; } }
-  if (call.completed_step !== 'session_observer' || updates.outcome !== 'checkpoint') return null;
-  const sent = state.delivered_checkpoint;
-  const receipt = state.checkpoint_delivery;
-  if (!sent || !receipt?.processed_at || receipt.id !== sent.id) return null;
-  if (call.conversation_id !== sent.conversation_id ||
-      updates.duration_ms !== sent.state_updates?.duration_ms) return null;
-  return `FORGE PASSIVE CHECKPOINT ${sent.id} was already recorded at ${receipt.processed_at}. ` +
-    `Do not resubmit it — duration deltas are added without server-side deduplication. ` +
-    `Continue the user's request; nothing further is needed for this checkpoint.`;
-}
-
 // -- Main -------------------------------------------------------------------
 
 async function main() {
@@ -472,10 +453,18 @@ async function main() {
   // (graceful no-capture, no breakage). Fail-soft: any parse/IO error leaves
   // the call unchanged — token capture must never block forge__update_state.
   if (bare === 'forge__update_state') {
-    const replay = checkpointReplayReason(state, event);
-    if (replay) {
-      process.stdout.write(JSON.stringify({ decision: 'deny', reason: replay }));
-      return;
+    const normalized = stateCall(event.tool_input || {});
+    // Leave malformed ordinary calls for server validation, without rewriting
+    // them into an apparently valid but corrupted object.
+    if (!normalized) return;
+    if (normalized.completed_step === 'session_observer' && normalized.state_updates.outcome === 'checkpoint') {
+      let reason;
+      try { reason = claim(sessionState, normalized); }
+      catch { reason = 'Could not validate the passive checkpoint claim. Do not retry this submission.'; }
+      if (reason) {
+        process.stdout.write(JSON.stringify({ decision: 'deny', reason }));
+        return;
+      }
     }
     // Codex build: the stamp is delivered via updatedInput, which Codex only
     // honors from rust-v0.131.0 — bail BEFORE any capture work (rollout
@@ -483,9 +472,8 @@ async function main() {
     // comment block above.
     if (!codexSupportsUpdatedInput(event)) return;
     try {
-      let toolInput = event.tool_input || {};
-      if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);
-      const stateUpdates = { ...(toolInput.state_updates || {}) };
+      const toolInput = normalized;
+      const stateUpdates = { ...toolInput.state_updates };
       // Resolve the session log ONCE per invocation — token capture and the
       // active-time stamp below consume the same parsed records instead of
       // each re-reading multi-MiB transcript files (review #10).
@@ -500,7 +488,7 @@ async function main() {
       //     rows across all its Forge conversations — this workflow + the
       //     observer — instead of counting one per conversation), and
       //   - duration_ms (R1 idle-excluded active time; active-workflow steps only).
-      let changed = false;
+      let changed = typeof event.tool_input === 'string' || typeof event.tool_input?.state_updates === 'string';
       // Never clobber a token_usage the caller already set (defensive — the
       // model does not set it today, but a future client might). The one
       // exception is a Codex passive checkpoint: its token_usage is a snapshot

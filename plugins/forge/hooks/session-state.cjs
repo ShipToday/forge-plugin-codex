@@ -260,7 +260,7 @@ function cleanupStale() {
       // .tmp: a write interrupted before its rename. .display: must-display's
       // per-session breadcrumb sidecar (kept out of the state file so the two
       // PostToolUse hooks never contend for one write).
-      if (!file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.display')) continue;
+      if (!file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.display') && !file.endsWith('.attempt')) continue;
       const fp = path.join(STATE_DIR, file);
       const stat = fs.statSync(fp);
       if (now - stat.mtimeMs > CLEANUP_AGE_MS) {

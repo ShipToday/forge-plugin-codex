@@ -27,6 +27,8 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { stateCall } = require('./hook-input.cjs');
+const { attempted } = require('./checkpoint-claim.cjs');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
 
@@ -484,12 +486,9 @@ async function main() {
   // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
-    let call = event.tool_input || {};
-    if (typeof call === 'string') { try { call = JSON.parse(call); } catch { return; } }
-    // The server accepts state_updates as a JSON string too; a string here
-    // must not let a passive checkpoint fall through to the completion reset.
-    let passive = call.state_updates || {};
-    if (typeof passive === 'string') { try { passive = JSON.parse(passive) || {}; } catch { passive = {}; } }
+    const call = stateCall(event.tool_input || {});
+    if (!call) return;
+    const passive = call.state_updates;
     const text = responseText(toolResponse);
     // Only recognized successful responses may update local workflow state.
     // In particular, a rejected update must not clear a pending question.
@@ -497,9 +496,8 @@ async function main() {
         !isRelayedQuestionReentry(toolResponse) && !/\*\*NEXT STEP\*\*/.test(text)) return;
     if (passive.outcome === 'checkpoint' && call.completed_step === 'session_observer') {
       const state = sessionState.read();
-      const sent = state.delivered_checkpoint;
-      if (sent && call.conversation_id === sent.conversation_id &&
-          passive.duration_ms === sent.state_updates.duration_ms && /Checkpoint recorded/.test(text)) {
+      if (attempted(sessionState, state, call) && !state.checkpoint_delivery.processed_at &&
+          /Checkpoint recorded/.test(text)) {
         sessionState.write({ checkpoint_delivery: { ...state.checkpoint_delivery,
           processed_at: new Date().toISOString() } });
       }
