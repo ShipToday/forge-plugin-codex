@@ -29,6 +29,7 @@
 const sessionStateModule = require('./session-state.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { attempted } = require('./checkpoint-claim.cjs');
+const { normalizeToolEvent } = require('./tool-event.cjs');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
 
@@ -85,22 +86,24 @@ function isValidWorkflowResponse(response) {
 
 /**
  * Check if a forge__update_state response indicates workflow completion.
- * Completion responses contain patterns like "(3/3)" where both numbers match,
- * or "Skill ... completed" for standalone skills.
+ * Require a server completion header, not incidental progress in wrapper logs.
+ * A nonterminal marker always wins over a completion-looking line.
  */
 function isWorkflowComplete(response) {
   if (!response) return false;
   const text = responseText(response);
 
-  // Pattern: "(N/N)" where both numbers are equal — all steps done
-  const stepMatch = text.match(/\((\d+)\/(\d+)\)/);
+  if (/\*\*(?:CHECKPOINT|RE-ENTRY|NEXT STEP)\*\*/.test(text)) return false;
+
+  const stepMatch = text.match(/^Step "[^"\r\n]+" completed\. \((\d+)\/(\d+)\)\s*$/m);
   if (stepMatch && stepMatch[1] === stepMatch[2]) return true;
 
   // Pattern: "Skill **name** completed." — standalone skill finished
-  if (/Skill \*\*\w+\*\* completed\./.test(text)) return true;
+  if (/^Skill \*\*\w+\*\* completed\.\s*$/m.test(text)) return true;
 
   return false;
 }
+
 
 /**
  * Check if a forge__abandon_workflow response indicates a successful abandon.
@@ -322,6 +325,9 @@ async function main() {
   } catch {
     return; // Malformed input — exit silently
   }
+
+  event = normalizeToolEvent(event);
+  if (!event) return; // Ambiguous wrapped calls cannot safely update session state.
 
   // Scope state to this Claude Code session so concurrent sessions in the
   // same directory each track their own workflow.
@@ -626,7 +632,7 @@ async function main() {
         && !/\*\*Idempotent Retry\*\*/.test(text);
       const state = sessionState.read();
       const advanceUpdates = {};
-      if (state.pending_checkpoint) {
+      if (state.pending_checkpoint && isNextStepAdvance) {
         advanceUpdates.pending_checkpoint = false;
         advanceUpdates.pending_checkpoint_step = null;
         advanceUpdates.pending_checkpoint_at = null;
