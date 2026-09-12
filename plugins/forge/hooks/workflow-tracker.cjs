@@ -243,12 +243,8 @@ const VALID_STATUSES = new Set(['logged', 'linked', 'snoozed', 'dismissed']);
  * stage (or its 'other' fallback), so re-capturing would risk clobbering a
  * good value with the default. They are skipped here.
  */
-function extractObserverEvent(event) {
-  let input = event.tool_input || {};
-  if (typeof input === 'string') {
-    try { input = JSON.parse(input); } catch { return null; }
-  }
-  const updates = input.state_updates;
+function extractObserverEvent(call) {
+  const updates = call?.state_updates;
   if (!updates || updates.event_type !== 'observation_outcome') return null;
   if (updates.outcome === 'checkpoint') return null;
   // Prefer the skill's DECLARED final state. session_observer emits
@@ -290,13 +286,8 @@ function extractObserverEvent(event) {
  *
  * Returns true for the gate, false otherwise.
  */
-function extractObservationGate(event) {
-  let input = event.tool_input || {};
-  if (typeof input === 'string') {
-    try { input = JSON.parse(input); } catch { return false; }
-  }
-  const updates = input.state_updates;
-  return !!updates && updates.outcome === 'observation_disabled';
+function extractObservationGate(call) {
+  return !!call?.state_updates && call.state_updates.outcome === 'observation_disabled';
 }
 
 /**
@@ -313,12 +304,8 @@ function extractConversationId(response) {
 /**
  * Extract the workflow id from the tool input.
  */
-function extractSkillContext(event) {
-  let input = event.tool_input || {};
-  if (typeof input === 'string') {
-    try { input = JSON.parse(input); } catch { input = {}; }
-  }
-  return input.workflow || null;
+function extractSkillContext(call) {
+  return call?.workflow || null;
 }
 
 // -- Main --------------------------------------------------------------------
@@ -343,20 +330,24 @@ async function main() {
   const toolName = event.tool_name || '';
   const toolResponse = event.tool_response || '';
 
-  // Codex: failed tools must not acknowledge passive delivery or clear guards.
-  if (toolResponse?.isError || event.error ||
-      (typeof toolResponse === 'object' && toolResponse.error)) return;
+  // Codex: a failed tool must not acknowledge passive delivery or clear guards.
+  // Scoped to the response-driven branches below — the start_workflow preflight
+  // branch still needs to run for a failed start, which is exactly when the
+  // observer should stay suppressed for the turn.
+  const toolFailed = !!(toolResponse?.isError || event.error ||
+    (typeof toolResponse === 'object' && toolResponse.error));
+
+  // The one shape every branch below agrees on. A malformed top-level input is
+  // not a call we can reason about.
+  const call = stateCall(event.tool_input || {});
 
   // Track local skill invocations via the Skill tool (Claude Code).
   // The PostToolUse hook fires for ALL tool calls — including the built-in
   // Skill tool. We record which local skills the AI invoked so the
   // stop-observer checkpoint can flush them to the Forge audit trail.
   if (toolName === 'Skill') {
-    let toolInput = event.tool_input || {};
-    if (typeof toolInput === 'string') {
-      try { toolInput = JSON.parse(toolInput); } catch { toolInput = {}; }
-    }
-    const skillName = toolInput.skill || null;
+    if (toolFailed) return;
+    const skillName = call?.skill || null;
     // Ignore forge-autopilot — that's our own routing skill, not a local skill.
     // The skill id can arrive namespaced: Claude Code surfaces plugin skills as
     // "forge-shiptoday:forge-autopilot", so a bare `=== 'forge-autopilot'` check
@@ -389,6 +380,12 @@ async function main() {
 
   if (!isWorkflowStart && !isStateUpdate && !isAbandon) return; // Not a Forge tool — exit silently
 
+  // A response-driven branch reads what the server said; a failed call said
+  // nothing. The preflight branch below is the exception and checks this
+  // itself, because a FAILED start is still a start that must suppress the
+  // observer for this turn.
+  if (toolFailed && !isWorkflowStart) return;
+
   // Workflow abandoned: clear local session state immediately. Mirrors the
   // workflow-completion handler below — same flag flips, same observer-block
   // semantics — so the UserPromptSubmit hook stops emitting "workflow active"
@@ -419,9 +416,9 @@ async function main() {
   }
 
   // Workflow start: mark session as active and capture context
-  if (isWorkflowStart && isValidWorkflowResponse(toolResponse)) {
+  if (isWorkflowStart && !toolFailed && isValidWorkflowResponse(toolResponse)) {
     const conversationId = extractConversationId(toolResponse);
-    const currentSkill = extractSkillContext(event);
+    const currentSkill = extractSkillContext(call);
     const toolPermissions = extractToolPermissions(toolResponse);
     const currentStepSkill = extractCurrentStepSkill(toolResponse);
     const updates = {
@@ -486,7 +483,6 @@ async function main() {
   // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
-    const call = stateCall(event.tool_input || {});
     if (!call) return;
     const passive = call.state_updates;
     const text = responseText(toolResponse);
@@ -535,13 +531,13 @@ async function main() {
     // the next session start. No tracking status is set — a disabled org is
     // not tracked. Keyed off outcome (not event_type), so it fires for the
     // current `observation_skipped` payload and survives an event_type rename.
-    if (extractObservationGate(event)) {
+    if (extractObservationGate(call)) {
       sessionState.write({ forge_observation_enabled: false });
       // Don't return — a single-step gated workflow also reports completion
       // below, which clears active_workflow / sets observer_blocked.
     }
 
-    const observerEvent = extractObserverEvent(event);
+    const observerEvent = extractObserverEvent(call);
     if (observerEvent) {
       const { status: observerStatus, outcome: observerOutcome, sdlcStage } = observerEvent;
       const statusUpdates = {};

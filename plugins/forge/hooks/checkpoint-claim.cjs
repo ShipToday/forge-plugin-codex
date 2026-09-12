@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const { isDeepStrictEqual } = require('util');
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const { UUID_RE } = require('./hook-input.cjs');
 
 function matches(state, call) {
   const sent = state.delivered_checkpoint;
@@ -21,21 +21,25 @@ function attemptPath(session, id) {
   return `${session.stateFilePath}.${id}.attempt`;
 }
 
-// Exclusive creation is the cross-process claim. Atomic state replacement alone
-// is not a lock: two PreToolUse processes could both read an unattempted receipt.
-function claim(session, call) {
-  const state = session.read();
-  if (!matches(state, call)) return 'Unknown, stale, or modified passive checkpoint. Use only the current delivered payload; do not reconstruct or replay it.';
-  if (state.checkpoint_delivery.attempted_at || state.checkpoint_delivery.processed_at) {
-    return 'This passive checkpoint was already attempted or recorded. Do not retry it, even if the previous result is unknown.';
+// Exclusive creation is the cross-process claim, and it is the ONLY record of
+// one: two PreToolUse processes can both read an unattempted receipt, but only
+// one can create the file. A mismatch never creates it, so the exact delivered
+// payload stays submittable — say so, because the skill otherwise tells the
+// model never to retry a denied attempt and the interval would be lost.
+function claim(session, call, state = session.read()) {
+  if (!matches(state, call)) {
+    return 'This does not match the checkpoint currently delivered in this session. ' +
+      'Submit the delivered_checkpoint payload exactly as it appears in the session state — ' +
+      'conversation_id, completed_step and state_updates unchanged — or submit nothing. ' +
+      'Do not reconstruct, edit or replay a payload.';
+  }
+  if (state.checkpoint_delivery.processed_at) {
+    return 'This passive checkpoint was already recorded. Do not submit it again.';
   }
   const id = call.state_updates.codex_checkpoint_id;
-  const at = new Date().toISOString();
   try {
-    fs.writeFileSync(attemptPath(session, id), at, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    const current = session.read();
-    if (!matches(current, call)) return 'The delivered checkpoint changed before submission. Do not retry this stale payload.';
-    session.write({ checkpoint_delivery: { ...current.checkpoint_delivery, attempted_at: at } });
+    fs.writeFileSync(attemptPath(session, id), new Date().toISOString(),
+      { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     return null;
   } catch (error) {
     return error.code === 'EEXIST'
@@ -44,8 +48,10 @@ function claim(session, call) {
   }
 }
 
+// The claim file is the proof: a processing receipt is only written for a
+// submission that actually passed through the guard.
 function attempted(session, state, call) {
-  return matches(state, call) && !!state.checkpoint_delivery.attempted_at &&
+  return matches(state, call) &&
     fs.existsSync(attemptPath(session, call.state_updates.codex_checkpoint_id));
 }
 

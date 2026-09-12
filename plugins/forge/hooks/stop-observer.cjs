@@ -102,7 +102,7 @@ async function main() {
     }));
     else if (old?.state_updates.token_usage) updates.token_usage = old.state_updates.token_usage;
     // Reserve interval and payload together; this is NOT a remote receipt.
-    // Ambiguous calls aren't retried: the server adds deltas without dedup.
+    // Each delivered checkpoint is submitted at most once and never retried.
     session.write({
       passive_checkpoint_due: { id: checkpointId, queued_at: old?.queued_at || at,
         through: at, skills_through: skills.length, conversation_id: state.last_observer_conversation_id,

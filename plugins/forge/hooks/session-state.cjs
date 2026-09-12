@@ -281,20 +281,25 @@ function cleanupStale() {
  * @param {string|undefined} sessionId — Claude Code session id
  * @returns {{ read: Function, write: Function, increment: Function, stateFilePath: string }}
  */
+// Codex: atomic replace. The temp file is owner-private (0600 where honoured)
+// and renamed over the target, so a reader never sees a torn write. Exported
+// because the sidecars beside the state file deserve the same treatment.
+function writeFileAtomic(fp, contents) {
+  ensureDir();
+  const temporary = `${fp}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, contents, { encoding: 'utf8', mode: 0o600 });
+    renameWithRetry(temporary, fp);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch { /* renamed or absent */ }
+  }
+}
+
 function forSession(sessionId) {
   const fp = statePath(sessionId);
 
-  // Codex: atomic replace. The temp file is owner-private (0600 where honoured)
-  // and renamed over the state file, so a reader never sees a torn write.
   function writeRaw(state) {
-    ensureDir();
-    const temporary = `${fp}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(temporary, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
-      renameWithRetry(temporary, fp);
-    } finally {
-      try { fs.unlinkSync(temporary); } catch { /* renamed or absent */ }
-    }
+    writeFileAtomic(fp, JSON.stringify(state, null, 2));
   }
 
   /**
@@ -381,4 +386,4 @@ function forSession(sessionId) {
   return { read, write, increment, stateFilePath: fp };
 }
 
-module.exports = { forSession };
+module.exports = { forSession, writeFileAtomic };
