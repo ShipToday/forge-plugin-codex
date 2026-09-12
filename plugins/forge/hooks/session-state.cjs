@@ -116,7 +116,34 @@ function statePath(sessionId) {
 
 function ensureDir() {
   if (!fs.existsSync(STATE_DIR)) {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
+    // Codex: owner-private where the platform honours modes (POSIX; ignored on
+    // Windows).
+    fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  }
+}
+
+// Codex: rename-over on Windows fails with EPERM (EACCES/EBUSY on some
+// filesystems) while another process has the target open — and the two
+// PostToolUse hooks run concurrently on every tool call, so that is common,
+// not rare. A dropped write here silently loses a workflow-completion reset
+// and leaves a stale allowlist enforcing for hours. The contention window is
+// microseconds; retry with a short bounded backoff (≤ ~180 ms total).
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_ATTEMPTS = 8;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function renameWithRetry(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (err) {
+      if (!RENAME_RETRY_CODES.has(err.code) || attempt >= RENAME_ATTEMPTS) throw err;
+      sleepSync(5 * (attempt + 1));
+    }
   }
 }
 
@@ -145,6 +172,17 @@ function freshState(sessionId) {
     routing_emitted: false,
     active_workflow: false,
     observer_blocked: false,
+    // Codex-only passive queue/delivery state. Missing fields in older files
+    // are treated as empty; delivered does not mean processed or authorized.
+    observation_due: null,
+    delivered_observation: null,
+    observation_delivery: null,
+    passive_checkpoint_due: null,
+    delivered_checkpoint: null,
+    checkpoint_delivery: null,
+    last_stop_turn_id: null,
+    last_passive_prompt_turn: null,
+    last_checkpoint_turn: 0,
     last_observer_turn: null,
     last_checkpoint_at: null,
     conversation_id: null,   // Forge conversation ID for active workflow
@@ -219,7 +257,10 @@ function cleanupStale() {
     const files = fs.readdirSync(STATE_DIR);
     const now = Date.now();
     for (const file of files) {
-      if (!file.endsWith('.json')) continue;
+      // .tmp: a write interrupted before its rename. .display: must-display's
+      // per-session breadcrumb sidecar (kept out of the state file so the two
+      // PostToolUse hooks never contend for one write).
+      if (!file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.display') && !file.endsWith('.attempt')) continue;
       const fp = path.join(STATE_DIR, file);
       const stat = fs.statSync(fp);
       if (now - stat.mtimeMs > CLEANUP_AGE_MS) {
@@ -243,9 +284,17 @@ function cleanupStale() {
 function forSession(sessionId) {
   const fp = statePath(sessionId);
 
+  // Codex: atomic replace. The temp file is owner-private (0600 where honoured)
+  // and renamed over the state file, so a reader never sees a torn write.
   function writeRaw(state) {
     ensureDir();
-    fs.writeFileSync(fp, JSON.stringify(state, null, 2), 'utf8');
+    const temporary = `${fp}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
+      renameWithRetry(temporary, fp);
+    } finally {
+      try { fs.unlinkSync(temporary); } catch { /* renamed or absent */ }
+    }
   }
 
   /**

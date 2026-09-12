@@ -27,6 +27,8 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { stateCall } = require('./hook-input.cjs');
+const { attempted } = require('./checkpoint-claim.cjs');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
 
@@ -341,6 +343,10 @@ async function main() {
   const toolName = event.tool_name || '';
   const toolResponse = event.tool_response || '';
 
+  // Codex: failed tools must not acknowledge passive delivery or clear guards.
+  if (toolResponse?.isError || event.error ||
+      (typeof toolResponse === 'object' && toolResponse.error)) return;
+
   // Track local skill invocations via the Skill tool (Claude Code).
   // The PostToolUse hook fires for ALL tool calls — including the built-in
   // Skill tool. We record which local skills the AI invoked so the
@@ -389,6 +395,8 @@ async function main() {
   // reminders on the next turn.
   if (isAbandon && isWorkflowAbandoned(toolResponse)) {
     sessionState.write({
+      // Codex: the turn-cadence baseline moves with the time baseline below.
+      last_checkpoint_turn: sessionState.read().turn_count || 0,
       active_workflow: false,
       observer_blocked: true,
       conversation_id: null,
@@ -435,6 +443,10 @@ async function main() {
     // overwritten by a chained follow-up workflow.
     if (currentSkill === 'observe_session') {
       updates.last_observer_conversation_id = conversationId;
+      updates.observation_due = null;
+      const delivery = sessionState.read().observation_delivery;
+      if (delivery) updates.observation_delivery = { ...delivery,
+        processed_at: new Date().toISOString(), disposition: 'observe' };
     }
     sessionState.write(updates);
     return;
@@ -462,7 +474,10 @@ async function main() {
   // duration. A hard start error lands here too and is benign — the re-arm clears
   // the block on the next turn.
   if (isWorkflowStart) {
-    sessionState.write({ observer_blocked: true });
+    // Codex: passive delivery (passive-observation.cjs) suppresses the next
+    // prompt from this turn stamp, because prompt-router re-arms
+    // observer_blocked before delivery runs.
+    sessionState.write({ observer_blocked: true, clarification_at_turn: sessionState.read().turn_count || 0 });
     return;
   }
 
@@ -471,6 +486,37 @@ async function main() {
   // use it for checkpoint logic. Claude is instructed to write this itself,
   // but it inconsistently forgets — this hook makes it reliable.
   if (isStateUpdate) {
+    const call = stateCall(event.tool_input || {});
+    if (!call) return;
+    const passive = call.state_updates;
+    const text = responseText(toolResponse);
+    // Only recognized successful responses may update local workflow state.
+    // In particular, a rejected update must not clear a pending question.
+    if (!isWorkflowComplete(toolResponse) && !extractPendingCheckpointStep(toolResponse) &&
+        !isRelayedQuestionReentry(toolResponse) && !/\*\*NEXT STEP\*\*/.test(text)) return;
+    if (passive.outcome === 'checkpoint' && call.completed_step === 'session_observer') {
+      const state = sessionState.read();
+      if (attempted(sessionState, state, call) && !state.checkpoint_delivery.processed_at &&
+          /Checkpoint recorded/.test(text)) {
+        sessionState.write({ checkpoint_delivery: { ...state.checkpoint_delivery,
+          processed_at: new Date().toISOString() } });
+      }
+      // A completed-observer checkpoint is NOT completion of another active
+      // workflow. It must not reset the already-reserved time boundary.
+      return;
+    }
+    if (isWorkflowComplete(toolResponse) && (passive.event_type === 'observation_outcome' ||
+        passive.outcome === 'observation_disabled')) {
+      const state = sessionState.read();
+      const final = passive.final_session_state || {};
+      sessionState.write({ observation_due: null, last_observer_turn: state.turn_count,
+        ...(typeof final.wake_condition === 'string' ? { wake_condition: final.wake_condition } : {}),
+        ...(typeof final.work_item_key === 'string' ? { work_item_key: final.work_item_key } : {}),
+        ...(typeof passive.work_item_key === 'string' ? { work_item_key: passive.work_item_key } : {}),
+        ...(state.observation_delivery ? { observation_delivery: { ...state.observation_delivery,
+          processed_at: new Date().toISOString(), disposition: passive.outcome } } : {}),
+      });
+    }
     // Any forge__update_state means the model is driving the workflow
     // forward (advance, checkpoint, re-entry, or completion) — disarm the
     // required-skill continuation backstop so the Stop hook does not nudge.
@@ -518,6 +564,10 @@ async function main() {
       if (observerStatus) {
         statusUpdates.status = observerStatus;
         statusUpdates.last_checkpoint_at = new Date().toISOString();
+        // Codex: the turn-cadence baseline moves with the time baseline, so a
+        // freshly logged session does not queue a near-zero checkpoint on its
+        // very next Stop.
+        statusUpdates.last_checkpoint_turn = sessionState.read().turn_count || 0;
         // For dismissed, also block re-observation
         if (observerStatus === 'dismissed') {
           statusUpdates.observer_blocked = true;
@@ -615,6 +665,8 @@ async function main() {
   // PDLC phrases) because it checks active_workflow, not observer_blocked.
   if (isStateUpdate && isWorkflowComplete(toolResponse)) {
     sessionState.write({
+      // Codex: the turn-cadence baseline moves with the time baseline below.
+      last_checkpoint_turn: sessionState.read().turn_count || 0,
       active_workflow: false,
       observer_blocked: true,
       conversation_id: null,

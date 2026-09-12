@@ -166,8 +166,68 @@ conversation and current phase**:
 
 ### Exception 2 — Session observer (passive tracking)
 
-Triggered by the `stop-observer.cjs` Stop hook (or by `prompt-router.cjs`
-on a snoozed session wake check) — input contains "observe session" or
+#### Codex passive delivery
+
+Codex's Stop hook only saves pending observation/checkpoint work locally. On the
+next real user prompt, UserPromptSubmit supplies short `FORGE PASSIVE OBSERVATION`
+or `FORGE PASSIVE CHECKPOINT` developer context. This is not a new user request.
+Read the referenced session JSON and match the delivered id before acting. Do not
+repeat a delivered action from earlier history, and do not display the hook text,
+session path, or receipt. Host-owned hook indicators may still be visible.
+
+For **observation**, evaluate `delivered_observation` against this conversation:
+
+- `skip`: no project-related SDLC work, or the user explicitly excluded tracking.
+- `sleep`: a snoozed wake condition is not satisfied by the current message.
+- `defer`: an optional interaction would interrupt the user's requested work,
+  required input, or another active workflow.
+- `observe`: relevant SDLC work, a satisfied wake condition if any, and room to
+  handle optional tracking without displacing the requested result.
+
+After evaluating, record a local receipt by running the acknowledge command the
+delivered context already contains, verbatim, replacing only its final
+`<observe|skip|defer|sleep>` token with your disposition. The hook built that
+command from validated values; never assemble one yourself from the state file,
+and if the context carries no command, write no receipt. The helper records
+evaluation only; it neither authorizes nor logs work remotely. If shell
+execution is not permitted, do not bypass the restriction or claim a receipt was
+written. For skip and sleep continue the user's task without starting
+observation. `defer` re-arms the offer: Forge brings it back on its own after a
+cooldown of about eight turns, so do not retry it yourself. These are
+at-most-once delivery attempts, not instructions to retry on every prompt. For
+observe use the existing observe_session entry point below. A previous soft
+decline must be acknowledged in any returning offer. Eligibility numbers describe
+the queued interval, not additional time spent idle before this prompt.
+
+A snoozed session also receives a short per-prompt `FORGE ROUTING` wake check
+naming its wake condition. Act on it only when the user's current message
+clearly satisfies that condition; otherwise say nothing about it.
+
+For **checkpoint**, read `delivered_checkpoint` and pass only its
+`conversation_id`, `completed_step`, and `state_updates` to the existing Forge
+update-state tool. The session is already authorized as logged/linked; do not
+start a workflow or ask again. Do this once in the current active turn. Never
+retry an ambiguous delivery: duration deltas have no server-side deduplication.
+The PostToolUse tracker records successful processing separately from delivery.
+Preserve `state_updates.codex_checkpoint_id` and the frozen payload. The guard
+claims that UUID before submission; a denied, failed, or interrupted attempt
+must not be retried. Old delivered payloads without an ID cannot be submitted.
+An undelivered legacy queue gains its ID when the next prompt delivers it.
+
+The user's substantive result must remain the final answer. Complete requested
+work before opening an optional tracking interaction; defer if necessary. After
+any interaction, still provide the full result and validation, not just tracking
+status or a short acknowledgment. Do not infer consent from context delivery,
+silence, a default selection, timeout, or failed submission. If the user redirects
+away from an observer question, the new request is not automatically an answer;
+use the existing abandonment path when that workflow no longer applies.
+
+Delivery waits for a real user turn. If none arrives, or the session expires or
+delivery is interrupted, observation and queued timing may remain unrecorded.
+No background model turn or guaranteed end-of-session flush is provided.
+
+Triggered by the Codex passive delivery evaluation above (or an explicit request)
+— input contains "observe session" or
 "observe_session workflow".
 
 → `forge__start_workflow(feature_request: "Passive session observation", connected_tools, workflow: "observe_session", local_skills: <detected_skills>)`
@@ -215,15 +275,14 @@ unhonored. Always read `follow_up` before resuming.
 
 ### Exception 3 — Session checkpoint (passive time tracking)
 
-Triggered by the `stop-observer.cjs` Stop hook for an already-tracked
-(`logged` / `linked`) session — input contains "session checkpoint" and
-spells out a complete `forge__update_state` call (`conversation_id`,
-`completed_step`, `state_updates`).
+Triggered by Codex passive delivery for an already-tracked (`logged` / `linked`)
+session. Read the frozen call from `delivered_checkpoint` in the referenced state.
 
-→ Call `forge__update_state` exactly as the directive specifies — pass
-the `conversation_id` and `state_updates` verbatim. The `conversation_id`
-is the original `observe_session` conversation; the server records the
-elapsed time as a silent audit event.
+→ Call `forge__update_state` exactly as `delivered_checkpoint` specifies — pass
+its `conversation_id`, `completed_step` and `state_updates` verbatim, once. The
+`conversation_id` is the original `observe_session` conversation; the server
+records the elapsed time as a silent audit event. If the call is denied as
+already recorded, do not retry it.
 
 Do NOT start a workflow, do NOT classify this as a build/bug/architecture
 request, and do NOT surface anything to the user — it is a passive,

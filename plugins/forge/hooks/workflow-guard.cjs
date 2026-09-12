@@ -41,7 +41,8 @@
  * token columns on ad_hoc/checkpoint rows).
  *
  * Hook contract: PreToolUse hooks may emit a JSON payload on stdout —
- * `{decision: "deny", reason: "..."}` to refuse the tool, or
+ * `{hookSpecificOutput: {hookEventName: "PreToolUse",
+ *   permissionDecision: "deny", permissionDecisionReason: "..."}}` to refuse it, or
  * `{hookSpecificOutput: {permissionDecision: "allow", updatedInput: {…}}}`
  * to rewrite the tool input (Claude Code >= 2.0.10). Anything else (silence,
  * exit code 0) allows the call to proceed unchanged.
@@ -65,6 +66,16 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { stateCall } = require('./hook-input.cjs');
+const { claim } = require('./checkpoint-claim.cjs');
+
+// Codex does not accept top-level decision:"deny". Keep every denial on the
+// same supported contract so a policy decision cannot become a failed-open hook.
+function deny(reason) {
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+    hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason,
+  } }));
+}
 const { resolveSessionRecords, captureTokenUsageFromResolved, resolveCodexRolloutPath } = require('./token-usage.cjs');
 const { activeMsFromEvent, activeMsFromResolved } = require('./active-time.cjs');
 const fs = require('fs');
@@ -170,13 +181,14 @@ function codexSupportsUpdatedInput(event) {
   let supported = false;
   let version = null;
   try {
-    // shell:true on Windows so the `codex.cmd` npm shim resolves; the
-    // arguments are a fixed literal, so there is no injection surface.
-    const out = String(execFileSync('codex', ['--version'], {
-      timeout: 2000,
-      shell: process.platform === 'win32',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }));
+    // shell:true on Windows so the `codex.cmd` npm shim resolves. The whole
+    // command is one fixed literal there (no args array): Node 24 deprecates
+    // shell:true combined with an args array (DEP0190) and prints the warning
+    // to stderr, which in a hook is noise on every tool call. Either form has
+    // no injection surface — nothing here comes from input.
+    const out = String(process.platform === 'win32'
+      ? execFileSync('codex --version', [], { timeout: 2000, shell: true, stdio: ['ignore', 'pipe', 'ignore'] })
+      : execFileSync('codex', ['--version'], { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
     const v = parseVersionTriple(out);
     if (v) {
       version = v.join('.');
@@ -450,15 +462,27 @@ async function main() {
   // (graceful no-capture, no breakage). Fail-soft: any parse/IO error leaves
   // the call unchanged — token capture must never block forge__update_state.
   if (bare === 'forge__update_state') {
+    const normalized = stateCall(event.tool_input || {});
+    // Leave malformed ordinary calls for server validation, without rewriting
+    // them into an apparently valid but corrupted object.
+    if (!normalized) return;
+    if (normalized.completed_step === 'session_observer' && normalized.state_updates.outcome === 'checkpoint') {
+      let reason;
+      try { reason = claim(sessionState, normalized); }
+      catch { reason = 'Could not validate the passive checkpoint claim. Do not retry this submission.'; }
+      if (reason) {
+        deny(reason);
+        return;
+      }
+    }
     // Codex build: the stamp is delivered via updatedInput, which Codex only
     // honors from rust-v0.131.0 — bail BEFORE any capture work (rollout
     // parsing is wasted when the rewrite can't be delivered). See the gate's
     // comment block above.
     if (!codexSupportsUpdatedInput(event)) return;
     try {
-      let toolInput = event.tool_input || {};
-      if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);
-      const stateUpdates = { ...(toolInput.state_updates || {}) };
+      const toolInput = normalized;
+      const stateUpdates = { ...toolInput.state_updates };
       // Resolve the session log ONCE per invocation — token capture and the
       // active-time stamp below consume the same parsed records instead of
       // each re-reading multi-MiB transcript files (review #10).
@@ -473,10 +497,16 @@ async function main() {
       //     rows across all its Forge conversations — this workflow + the
       //     observer — instead of counting one per conversation), and
       //   - duration_ms (R1 idle-excluded active time; active-workflow steps only).
-      let changed = false;
+      let changed = typeof event.tool_input === 'string' || typeof event.tool_input?.state_updates === 'string';
       // Never clobber a token_usage the caller already set (defensive — the
-      // model does not set it today, but a future client might).
-      if (tokens && !stateUpdates.token_usage) {
+      // model does not set it today, but a future client might). The one
+      // exception is a Codex passive checkpoint: its token_usage is a snapshot
+      // frozen when stop-observer.cjs queued it, possibly many turns ago, so a
+      // capture taken now is strictly fresher (cumulative — the server keeps
+      // the larger value either way).
+      const passiveCheckpoint = toolInput.completed_step === 'session_observer'
+        && stateUpdates.outcome === 'checkpoint';
+      if (tokens && (!stateUpdates.token_usage || passiveCheckpoint)) {
         // Stamp one component bag PER model so the orchestrator
         // writes a per-model token_usage row — a delegated session (Opus main +
         // Sonnet sub-agent) is then weighted per model at read. Fall back to the
@@ -604,10 +634,7 @@ async function main() {
 
   // Layer 1: CHECKPOINT enforcement.
   if (state.pending_checkpoint) {
-    process.stdout.write(JSON.stringify({
-      decision: 'deny',
-      reason: buildCheckpointDenyReason(state, bare),
-    }));
+    deny(buildCheckpointDenyReason(state, bare));
     return;
   }
 
@@ -615,10 +642,7 @@ async function main() {
   if (Array.isArray(state.current_step_tools) && state.current_step_tools.length > 0) {
     const category = categoryFor(bare);
     if (category && !state.current_step_tools.includes(category)) {
-      process.stdout.write(JSON.stringify({
-        decision: 'deny',
-        reason: buildStepPermissionDenyReason(state, bare, category),
-      }));
+      deny(buildStepPermissionDenyReason(state, bare, category));
       return;
     }
   }
