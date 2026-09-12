@@ -52,18 +52,21 @@ function epicKeyRouting(key) {
   );
 }
 
-function emitWorkflowContinuation(conversationId, currentSkill) {
-  const parts = ['FORGE ROUTING: A Forge workflow is active and waiting for user input.'];
+function emitWorkflowContinuation(state) {
+  const { conversation_id: conversationId, current_skill: currentSkill } = state;
+  const hasCheckpoint = state.pending_checkpoint === true;
+  const parts = [hasCheckpoint ? 'FORGE ROUTING: A Forge workflow has a pending decision.' : 'FORGE ROUTING: A Forge workflow is active.'];
   if (currentSkill) parts.push(`The active skill is "${currentSkill}".`);
   if (conversationId) parts.push(`The Forge conversation ID is "${conversationId}".`);
-  parts.push(
-    'The user\'s message is a response to the workflow\'s last question.',
-    'You MUST continue the active Forge workflow — do NOT start a new workflow or treat this as a fresh request.',
-    'Pass the user\'s full message as the answer to the pending checkpoint.',
-    'If the user has clearly redirected to unrelated work and the workflow no longer applies,',
-    'call `forge__abandon_workflow` with a meaningful reason to cleanly close the conversation.',
-    'Do NOT silently bypass the workflow — silent bypass leaves the audit trail blind.'
-  );
+  if (hasCheckpoint) {
+    if (state.pending_checkpoint_step) parts.push(`The pending checkpoint is "${state.pending_checkpoint_step}".`);
+    if (state.pending_checkpoint_question_id) parts.push(`Question ID: "${state.pending_checkpoint_question_id}".`);
+    if (state.pending_checkpoint_response_field) parts.push(`Submit an actual answer through state_updates.${state.pending_checkpoint_response_field}.`);
+    parts.push('Determine whether the user answers this decision, asks for information, provides feedback, or requests independent work.', 'Only submit a clear answer to this already-open decision. Do not use status, discussion, conditions, silence, or generic continuation to select substantive alternatives.', 'Never use one message to answer future unseen questions. Keep independent work separate.');
+  } else {
+    parts.push('Continue the active workflow using its current instructions. Do not claim a question is pending or submit the user message as an answer unless Forge has returned a pinned checkpoint.');
+  }
+  parts.push('If the user has clearly redirected to unrelated work and the workflow no longer applies, call `forge__abandon_workflow` with a meaningful reason.');
   process.stdout.write(parts.join(' '));
 }
 
@@ -134,7 +137,7 @@ async function main() {
 
   // Step 2: Active workflow → tell Claude to continue, not start fresh
   if (state.active_workflow) {
-    emitWorkflowContinuation(state.conversation_id, state.current_skill);
+    emitWorkflowContinuation(state);
     return;
   }
 

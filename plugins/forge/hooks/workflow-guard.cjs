@@ -240,6 +240,9 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'Glob',
   'TodoWrite',
   'mark_chapter',
+  // Deferred Forge discovery is read-only and needed to recover a pinned
+  // workflow in hosts that expose tools lazily.
+  'ToolSearch',
   // Internal session tooling
   'spawn_task',
 ]);
@@ -367,13 +370,14 @@ function isAllowedByStepPermissions(bare, allowedCategories) {
 }
 
 function buildCheckpointDenyReason(state, toolName) {
+  const responseField = state.pending_checkpoint_response_field || 'gate_answer';
   const lines = [
     `Forge workflow is at a CHECKPOINT awaiting user input (skill="${state.pending_checkpoint_step || 'unknown'}").`,
     `Tool "${toolName}" cannot proceed until the user has answered.`,
     ``,
     'You have three options:',
     '  1. Call AskUserQuestion to relay the pending question to the user.',
-    '  2. Call forge__update_state with the user\'s answer (set state_updates.user_answer).',
+    `  2. Call forge__update_state with the user's answer (set state_updates.${responseField}).`,
     '  3. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
     '     Never abandon to skip the remaining steps: a post-step confirmation gate already offers the user "Stop here" for that — relay it.',
     ``,

@@ -298,6 +298,28 @@ function writeFileAtomic(fp, contents) {
 function forSession(sessionId) {
   const fp = statePath(sessionId);
 
+  function withLock(action) {
+    const lock = `${fp}.lock`; const deadline = Date.now() + 750;
+    while (true) {
+      try { fs.mkdirSync(lock); break; } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        try { if (Date.now() - fs.statSync(lock).mtimeMs > 5000) { fs.rmSync(lock, { recursive: true, force: true }); continue; } } catch { /* released concurrently */ }
+        if (Date.now() >= deadline) throw new Error('Timed out acquiring Forge session-state lock');
+        sleepSync(10);
+      }
+    }
+    try { return action(); } finally { try { fs.rmdirSync(lock); } catch { /* best effort */ } }
+  }
+
+  function readForWrite() {
+    if (!fs.existsSync(fp)) return freshState(sessionId);
+    let last;
+    for (let i = 0; i < 4; i += 1) {
+      try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch (error) { last = error; sleepSync(10); }
+    }
+    throw new Error(`Forge session state is unreadable; refusing to overwrite it: ${last?.message || 'parse failure'}`);
+  }
+
   function writeRaw(state) {
     writeFileAtomic(fp, JSON.stringify(state, null, 2));
   }
@@ -366,10 +388,7 @@ function forSession(sessionId) {
    * @param {Object} updates — fields to merge (shallow)
    */
   function write(updates) {
-    const state = read();
-    Object.assign(state, updates);
-    writeRaw(state);
-    return state;
+    return withLock(() => { const state = readForWrite(); Object.assign(state, updates); writeRaw(state); return state; });
   }
 
   /**
@@ -377,10 +396,7 @@ function forSession(sessionId) {
    * @param {string} field — the field name to increment
    */
   function increment(field) {
-    const state = read();
-    state[field] = (state[field] || 0) + 1;
-    writeRaw(state);
-    return state;
+    return withLock(() => { const state = readForWrite(); state[field] = (state[field] || 0) + 1; writeRaw(state); return state; });
   }
 
   return { read, write, increment, stateFilePath: fp };
