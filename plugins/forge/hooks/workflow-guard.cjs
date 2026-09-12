@@ -41,7 +41,8 @@
  * token columns on ad_hoc/checkpoint rows).
  *
  * Hook contract: PreToolUse hooks may emit a JSON payload on stdout —
- * `{decision: "deny", reason: "..."}` to refuse the tool, or
+ * `{hookSpecificOutput: {hookEventName: "PreToolUse",
+ *   permissionDecision: "deny", permissionDecisionReason: "..."}}` to refuse it, or
  * `{hookSpecificOutput: {permissionDecision: "allow", updatedInput: {…}}}`
  * to rewrite the tool input (Claude Code >= 2.0.10). Anything else (silence,
  * exit code 0) allows the call to proceed unchanged.
@@ -67,6 +68,14 @@
 const sessionStateModule = require('./session-state.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { claim } = require('./checkpoint-claim.cjs');
+
+// Codex does not accept top-level decision:"deny". Keep every denial on the
+// same supported contract so a policy decision cannot become a failed-open hook.
+function deny(reason) {
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+    hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason,
+  } }));
+}
 const { resolveSessionRecords, captureTokenUsageFromResolved, resolveCodexRolloutPath } = require('./token-usage.cjs');
 const { activeMsFromEvent, activeMsFromResolved } = require('./active-time.cjs');
 const fs = require('fs');
@@ -462,7 +471,7 @@ async function main() {
       try { reason = claim(sessionState, normalized); }
       catch { reason = 'Could not validate the passive checkpoint claim. Do not retry this submission.'; }
       if (reason) {
-        process.stdout.write(JSON.stringify({ decision: 'deny', reason }));
+        deny(reason);
         return;
       }
     }
@@ -625,10 +634,7 @@ async function main() {
 
   // Layer 1: CHECKPOINT enforcement.
   if (state.pending_checkpoint) {
-    process.stdout.write(JSON.stringify({
-      decision: 'deny',
-      reason: buildCheckpointDenyReason(state, bare),
-    }));
+    deny(buildCheckpointDenyReason(state, bare));
     return;
   }
 
@@ -636,10 +642,7 @@ async function main() {
   if (Array.isArray(state.current_step_tools) && state.current_step_tools.length > 0) {
     const category = categoryFor(bare);
     if (category && !state.current_step_tools.includes(category)) {
-      process.stdout.write(JSON.stringify({
-        decision: 'deny',
-        reason: buildStepPermissionDenyReason(state, bare, category),
-      }));
+      deny(buildStepPermissionDenyReason(state, bare, category));
       return;
     }
   }
