@@ -498,15 +498,17 @@ The sub-agent inherits your MCP tools and can call external connectors directly.
 
 **CRITICAL**: Sub-agents execute ONE step only. The `---DELEGATE BELOW---`
 content already includes a step boundary directive. After the sub-agent returns,
-YOU (the parent) **MUST display the sub-agent's full analysis, findings, and
-substantive output to the user immediately — before launching the next
-sub-agent, calling `forge__update_state`, or asking any confirmation
-question.** This rule fires on every sub-agent return, not just before
-confirmations. Do NOT summarize or paraphrase — reproduce the sub-agent's key
-content (analysis results, discovery summaries, recommendations, structured
-findings) so the user can see exactly what was produced. Then continue the
-workflow by interpreting the next step yourself. Do NOT expect the sub-agent
-to chain multiple steps.
+YOU (the parent) surface the user-facing findings before the next step or
+confirmation. Render designated `display_text` and `FORGE_DISPLAY_VERBATIM`
+bodies in full, without the sentinels. Also preserve complete user-facing
+deliverables explicitly required by the step, even when a legacy step has no
+`display_text`. Summarize other findings as useful prose.
+Do not display workflow-state JSON, catalogs, routes, tokens, tool examples,
+question schemas, or `FORGE_NEXT_STEP` instructions merely because they occur
+in a sub-agent return. Those are internal control data for you to consume.
+This is not a ban on JSON or code: preserve either when the user requested it
+or it is substantive review/approval material.
+Then interpret the next step yourself; do not expect a sub-agent to chain steps.
 
 Common loophole to avoid: when a sub-agent's return bundles both its
 substantive findings AND state-advancement metadata (e.g. "advanced to step
