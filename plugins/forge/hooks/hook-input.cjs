@@ -13,18 +13,17 @@ function record(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
-// A call whose state_updates is absent, null or some other non-object is still
-// a valid call: the server coerces that to {} and completes the step, so the
-// hooks must see it the same way or they skip the completion bookkeeping. Only
-// a malformed TOP-LEVEL input (or an unparseable state_updates string, which
-// was meant to carry fields) yields null.
+// A state_updates that is not a usable object is still a valid call. The server
+// coerces absent, null, a bare scalar, an array OR a string that will not parse
+// into an object, and completes the step on `{ ...that }` — which is {} in every
+// one of those cases. The hooks must read it the same way; treating any of them
+// as malformed skips the bookkeeping for a step the server finished and strands
+// the session on a stale active_workflow that keeps denying writes. An
+// unparseable string is no exception: it was meant to carry fields, but the
+// server does not reject it either. Only a malformed TOP-LEVEL input yields null.
 function stateCall(input) {
   const call = record(input);
   if (!call) return null;
-  if (typeof call.state_updates === 'string') {
-    const parsed = record(call.state_updates);
-    return parsed ? { ...call, state_updates: parsed } : null;
-  }
   return { ...call, state_updates: record(call.state_updates) || {} };
 }
 
