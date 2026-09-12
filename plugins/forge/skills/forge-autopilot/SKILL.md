@@ -206,13 +206,16 @@ clearly satisfies that condition; otherwise say nothing about it.
 For **checkpoint**, read `delivered_checkpoint` and pass only its
 `conversation_id`, `completed_step`, and `state_updates` to the existing Forge
 update-state tool. The session is already authorized as logged/linked; do not
-start a workflow or ask again. Do this once in the current active turn. Never
-retry an ambiguous delivery: duration deltas have no server-side deduplication.
-The PostToolUse tracker records successful processing separately from delivery.
-Preserve `state_updates.codex_checkpoint_id` and the frozen payload. The guard
-claims that UUID before submission; a denied, failed, or interrupted attempt
-must not be retried. Old delivered payloads without an ID cannot be submitted.
-An undelivered legacy queue gains its ID when the next prompt delivers it.
+start a workflow or ask again. Submit it once in the current active turn and
+never retry an attempt that was made: an interrupted or failed submission stays
+unretried, and so does an ambiguous one. The PostToolUse tracker records
+successful processing separately from delivery. Preserve
+`state_updates.codex_checkpoint_id` and the frozen payload exactly as delivered.
+The guard claims that UUID before submission. If it refuses because the payload
+does not match the delivered one, no attempt was made: resubmit the delivered
+payload verbatim, once. Old delivered payloads without an ID cannot be
+submitted. An undelivered legacy queue gains its ID when the next prompt
+delivers it.
 
 The user's substantive result must remain the final answer. Complete requested
 work before opening an optional tracking interaction; defer if necessary. After

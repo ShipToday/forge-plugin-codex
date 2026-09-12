@@ -468,7 +468,7 @@ async function main() {
     if (!normalized) return;
     if (normalized.completed_step === 'session_observer' && normalized.state_updates.outcome === 'checkpoint') {
       let reason;
-      try { reason = claim(sessionState, normalized); }
+      try { reason = claim(sessionState, normalized, state); }
       catch { reason = 'Could not validate the passive checkpoint claim. Do not retry this submission.'; }
       if (reason) {
         deny(reason);

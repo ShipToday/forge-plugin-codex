@@ -4,11 +4,11 @@
 // Codex-only delivery helpers. No network, no model turn, no implicit consent.
 const path = require('path');
 const sessionStateModule = require('./session-state.cjs');
-const CHECKPOINT_INTERVAL = 8;
-const DISPOSITIONS = ['observe', 'skip', 'defer', 'sleep'];
 // Queued ids are always randomUUID() from stop-observer.cjs; anything else is
 // dropped, never delivered.
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const { UUID_RE } = require('./hook-input.cjs');
+const CHECKPOINT_INTERVAL = 8;
+const DISPOSITIONS = ['observe', 'skip', 'defer', 'sleep'];
 // Arguments that reach the acknowledge command are validated first.
 const SAFE_ARG_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -49,7 +49,7 @@ function deliver(session, state, event) {
     session.write({ passive_checkpoint_due: null, delivered_checkpoint: pending,
       last_passive_prompt_turn: event.turn_id || null,
       skills_flushed_at_turn: pending.skills_through,
-      checkpoint_delivery: { id: pending.id, at, attempted_at: null, processed_at: null } });
+      checkpoint_delivery: { id: pending.id, at, processed_at: null } });
     return `FORGE PASSIVE CHECKPOINT: Read the existing forge-autopilot skill's ` +
       `Codex passive delivery instructions. Session state: ${JSON.stringify(session.stateFilePath)}. ` +
       `Process delivered_checkpoint ${pending.id} once in this active turn; preserve the user's substantive final answer.`;
@@ -75,7 +75,10 @@ function deliver(session, state, event) {
     observer_fired: true, observer_blocked: true, last_observer_turn: state.turn_count,
     last_passive_prompt_turn: event.turn_id || null,
     observation_delivery: { id: due.id, at, processed_at: null, disposition: null } });
-  const command = acknowledgeCommand(event.session_id || state.session_id, due.id);
+  // Only the host's own session id addresses this session's state file. A
+  // generated fallback id would name a different file, so the receipt would
+  // silently go nowhere: offer no command rather than one that cannot work.
+  const command = acknowledgeCommand(event.session_id, due.id);
   return `FORGE PASSIVE OBSERVATION: Read the existing forge-autopilot skill's ` +
     `Codex passive delivery instructions. Session state: ${JSON.stringify(session.stateFilePath)}. ` +
     `Evaluate delivered_observation ${due.id} once in this active turn; preserve the user's substantive final answer. ` +

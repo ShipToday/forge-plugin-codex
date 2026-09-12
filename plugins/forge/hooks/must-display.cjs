@@ -318,7 +318,8 @@ async function main() {
   if (!result.systemMessage) return;
 
   try {
-    fs.writeFileSync(sidecar, result.fingerprint, 'utf8');
+    // Same atomic, owner-private write as the state file beside it.
+    sessionStateModule.writeFileAtomic(sidecar, result.fingerprint);
   } catch {
     // Persisting dedup state is best-effort; showing the block is not.
   }

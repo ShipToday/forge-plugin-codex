@@ -156,8 +156,10 @@ async function main() {
   // Codex localization: Stop only queues work. Deliver it once as developer
   // context on a real prompt — alongside routing, never instead of it, so a
   // work-item mention can't hold back a queued checkpoint whose time is
-  // already reserved.
-  const passive = deliver(sessionState, state, event);
+  // already reserved. Its own try/catch: a failed state write must not take
+  // the routing hint down with it (that text is already built and correct).
+  let passive = '';
+  try { passive = deliver(sessionState, state, event); } catch { passive = ''; }
   if (passive) parts.push(passive);
 
   // Step 5: No state worth acting on → silent. The LLM reads the
