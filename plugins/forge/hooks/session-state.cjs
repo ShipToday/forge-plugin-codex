@@ -205,6 +205,10 @@ function freshState(sessionId) {
     pending_checkpoint: false,
     pending_checkpoint_step: null,    // Skill id pinned for input
     pending_checkpoint_at: null,      // ISO timestamp the pin was set
+    // Optional wire metadata parsed from a CHECKPOINT response. Older servers
+    // do not publish it; callers must retain the conservative fallback.
+    pending_checkpoint_question_id: null,
+    pending_checkpoint_response_field: null,
     // Per-step tool-permission allowlist (V2 enforcement).
     //   - current_step_tools: array of category strings the orchestrator
     //     published in the latest **Tool Permissions** line, or null when
@@ -311,7 +315,11 @@ function forSession(sessionId) {
     try { return action(); } finally { try { fs.rmdirSync(lock); } catch { /* best effort */ } }
   }
 
+  // Same idle expiry as read(): the first write after the idle window must not
+  // merge into, and so revive, the dead session's workflow, CHECKPOINT pin and
+  // allowlist. An expired file is replaced even when unreadable.
   function readForWrite() {
+    try { if (Date.now() - fs.statSync(fp).mtimeMs > TTL_MS) return freshState(sessionId); } catch { /* no file yet */ }
     if (!fs.existsSync(fp)) return freshState(sessionId);
     let last;
     for (let i = 0; i < 4; i += 1) {

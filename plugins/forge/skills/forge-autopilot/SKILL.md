@@ -358,7 +358,6 @@ legitimate next moves: relay the user question, advance
 the workflow itself no longer applies). This is not a security boundary:
 `forge__abandon_workflow` is always allowed, and task boundaries or a host
 wrapper may not expose every call to the hook.
-to the hook.
 
 If you receive a deny decision for a tool you genuinely need, the right
 move is usually to advance the workflow — the next step's allowlist
