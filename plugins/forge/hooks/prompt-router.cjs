@@ -91,7 +91,9 @@ async function main() {
   }
   let event = {};
   try {
-    event = JSON.parse(input);
+    // A host may frame stdin with a UTF-8 byte-order mark and a trailing CRLF
+    // (Cursor on Windows pipes it through PowerShell); trim() removes both.
+    event = JSON.parse(input.trim());
     prompt = event.prompt || event.message || event.content || '';
   } catch {
     prompt = input.trim();

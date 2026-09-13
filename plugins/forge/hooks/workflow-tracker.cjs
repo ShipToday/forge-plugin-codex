@@ -331,7 +331,9 @@ async function main() {
     input += chunk;
   }
   try {
-    event = JSON.parse(input);
+    // A host may frame stdin with a UTF-8 byte-order mark and a trailing CRLF
+    // (Cursor on Windows pipes it through PowerShell); trim() removes both.
+    event = JSON.parse(input.trim());
   } catch {
     return; // Malformed input — exit silently
   }
