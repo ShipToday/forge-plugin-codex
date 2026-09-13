@@ -315,7 +315,7 @@ const CATEGORY_PATTERNS = {
   ],
 
   code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/],
-  shell:        [/^Bash$/, /^PowerShell$/],
+  shell:        [/^Bash$/, /^PowerShell$/, /^Monitor$/],
 };
 
 // -- Helpers ----------------------------------------------------------------
