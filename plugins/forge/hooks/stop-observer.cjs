@@ -43,7 +43,9 @@ function skillContinuation(state) {
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
-  const event = JSON.parse(input);
+  // A host may frame stdin with a UTF-8 byte-order mark and a trailing CRLF
+  // (Cursor on Windows pipes it through PowerShell); trim() removes both.
+  const event = JSON.parse(input.trim());
   if (event.stop_hook_active) return;
   const session = sessionStateModule.forSession(event.session_id);
   const state = session.read();
