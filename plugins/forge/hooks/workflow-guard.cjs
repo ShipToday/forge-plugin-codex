@@ -240,6 +240,9 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'Glob',
   'TodoWrite',
   'mark_chapter',
+  // Deferred Forge discovery is read-only and needed to recover a pinned
+  // workflow in hosts that expose tools lazily.
+  'ToolSearch',
   // Internal session tooling
   'spawn_task',
 ]);
@@ -312,7 +315,7 @@ const CATEGORY_PATTERNS = {
   ],
 
   code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/],
-  shell:        [/^Bash$/, /^PowerShell$/],
+  shell:        [/^Bash$/, /^PowerShell$/, /^Monitor$/],
 };
 
 // -- Helpers ----------------------------------------------------------------
@@ -345,6 +348,20 @@ function isUniversallyAllowed(bare) {
   return false;
 }
 
+// Codex does not adopt the broad local bounded-shell exception. The PR
+// revalidation command is a separate, exact read-only shape shared with the
+// server protocol, so it can cross a pinned checkpoint without permitting
+// arbitrary shell commands or Monitor.
+function isPrRevisionRead(event, bare) {
+  if (!['Bash', 'PowerShell'].includes(bare)) return false;
+  let input = event.tool_input || {};
+  try { if (typeof input === 'string') input = JSON.parse(input); } catch { return false; }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const command = typeof input.command === 'string' ? input.command : '';
+  const match = /^gh pr view ([1-9]\d*) --repo https:\/\/github\.com\/(?!(?:\.|\.\.)\/)[A-Za-z0-9_.-]{1,200}\/(?!(?:\.|\.\.)(?: |$))[A-Za-z0-9_.-]{1,200} --json number,url,state,headRefOid$/.exec(command);
+  return Boolean(match && Number.isSafeInteger(Number(match[1])));
+}
+
 /**
  * Does the bare tool name match any pattern in the allowed categories?
  * Returns the matching category or null. If null, the tool either belongs
@@ -367,13 +384,14 @@ function isAllowedByStepPermissions(bare, allowedCategories) {
 }
 
 function buildCheckpointDenyReason(state, toolName) {
+  const responseField = state.pending_checkpoint_response_field || 'gate_answer';
   const lines = [
     `Forge workflow is at a CHECKPOINT awaiting user input (skill="${state.pending_checkpoint_step || 'unknown'}").`,
     `Tool "${toolName}" cannot proceed until the user has answered.`,
     ``,
     'You have three options:',
     '  1. Call AskUserQuestion to relay the pending question to the user.',
-    '  2. Call forge__update_state with the user\'s answer (set state_updates.user_answer).',
+    `  2. Call forge__update_state with the user's answer (set state_updates.${responseField}).`,
     '  3. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
     '     Never abandon to skip the remaining steps: a post-step confirmation gate already offers the user "Stop here" for that — relay it.',
     ``,
@@ -409,7 +427,9 @@ async function main() {
     input += chunk;
   }
   try {
-    event = JSON.parse(input);
+    // A host may frame stdin with a UTF-8 byte-order mark and a trailing CRLF
+    // (Cursor on Windows pipes it through PowerShell); trim() removes both.
+    event = JSON.parse(input.trim());
   } catch {
     return; // Malformed input — fail open
   }
@@ -630,7 +650,7 @@ async function main() {
   if (!state.active_workflow) return; // No active workflow — allow.
 
   // Universals always pass — Forge orchestration, AskUserQuestion, read-only.
-  if (isUniversallyAllowed(bare)) return;
+  if (isUniversallyAllowed(bare) || isPrRevisionRead(event, bare)) return;
 
   // Layer 1: CHECKPOINT enforcement.
   if (state.pending_checkpoint) {

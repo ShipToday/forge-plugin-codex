@@ -140,6 +140,16 @@ function extractPendingCheckpointStep(response) {
   return match ? match[1] : null;
 }
 
+function extractPendingCheckpointMetadata(response) {
+  const text = responseText(response);
+  const question = text.match(/\*\*Question ID\*\*:\s*`?([^`\n]+)`?/i);
+  const field = text.match(/\*\*Response Field\*\*:\s*`?(gate_answer|user_answer|question_response)`?/i);
+  return {
+    questionId: question ? question[1].trim() : null,
+    responseField: field ? field[1] : null,
+  };
+}
+
 /**
  * Check if a forge__update_state response indicates a relayed-question
  * RE-ENTRY — the user's answer has flowed back through the parent and the
@@ -321,7 +331,9 @@ async function main() {
     input += chunk;
   }
   try {
-    event = JSON.parse(input);
+    // A host may frame stdin with a UTF-8 byte-order mark and a trailing CRLF
+    // (Cursor on Windows pipes it through PowerShell); trim() removes both.
+    event = JSON.parse(input.trim());
   } catch {
     return; // Malformed input — exit silently
   }
@@ -407,6 +419,8 @@ async function main() {
       pending_checkpoint: false,
       pending_checkpoint_step: null,
       pending_checkpoint_at: null,
+      pending_checkpoint_question_id: null,
+      pending_checkpoint_response_field: null,
       current_step_tools: null,
       current_step_skill: null,
       // R1 anti-double-count: the workflow span was already banked — per-step
@@ -596,16 +610,21 @@ async function main() {
     // implicitly on workflow completion / abandonment below.
     const pendingStep = extractPendingCheckpointStep(toolResponse);
     if (pendingStep) {
+      const metadata = extractPendingCheckpointMetadata(toolResponse);
       sessionState.write({
         pending_checkpoint: true,
         pending_checkpoint_step: pendingStep,
         pending_checkpoint_at: new Date().toISOString(),
+        pending_checkpoint_question_id: metadata.questionId,
+        pending_checkpoint_response_field: metadata.responseField,
       });
     } else if (isRelayedQuestionReentry(toolResponse)) {
       sessionState.write({
         pending_checkpoint: false,
         pending_checkpoint_step: null,
         pending_checkpoint_at: null,
+        pending_checkpoint_question_id: null,
+        pending_checkpoint_response_field: null,
       });
     } else if (!isWorkflowComplete(toolResponse)) {
       // Normal step advance ("NEXT STEP") — clear any stale pin AND advance the
@@ -636,6 +655,8 @@ async function main() {
         advanceUpdates.pending_checkpoint = false;
         advanceUpdates.pending_checkpoint_step = null;
         advanceUpdates.pending_checkpoint_at = null;
+        advanceUpdates.pending_checkpoint_question_id = null;
+        advanceUpdates.pending_checkpoint_response_field = null;
       }
       if (isNextStepAdvance) {
         advanceUpdates.step_active_since = new Date().toISOString();
@@ -676,6 +697,8 @@ async function main() {
       pending_checkpoint: false,
       pending_checkpoint_step: null,
       pending_checkpoint_at: null,
+      pending_checkpoint_question_id: null,
+      pending_checkpoint_response_field: null,
       current_step_tools: null,
       current_step_skill: null,
       // R1 anti-double-count: the workflow span was already banked per-step
