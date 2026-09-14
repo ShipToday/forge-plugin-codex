@@ -215,9 +215,18 @@ function extractDisplayBlocks(response) {
 
 /** Stable fingerprint of a block set, for replay dedup. */
 function fingerprint(blocks) {
+  // A step-scoped position id is the event identity. Prefer it over hashing
+  // the whole block set so a start response (preflight + position) and a later
+  // recovery response (position only) deduplicate as the same step event.
+  // Legacy `position` ids still include the body so old servers do not make
+  // every step look identical.
+  const positionEvent = [...blocks].reverse().find((block) => block.id.startsWith('position:'));
+  const material = positionEvent
+    ? `${positionEvent.id}\u0000`
+    : blocks.map((b) => `${b.id}\u0000${b.body}`).join('\u0001');
   return crypto
     .createHash('sha256')
-    .update(blocks.map((b) => `${b.id}\u0000${b.body}`).join('\u0001'))
+    .update(material)
     .digest('hex')
     .slice(0, 16);
 }

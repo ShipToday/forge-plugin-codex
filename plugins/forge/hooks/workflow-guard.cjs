@@ -314,7 +314,7 @@ const CATEGORY_PATTERNS = {
     /^get_account_info$/,
   ],
 
-  code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/],
+  code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/, /^(?:functions\.)?apply_patch$/],
   shell:        [/^Bash$/, /^PowerShell$/, /^Monitor$/],
 };
 
@@ -346,6 +346,98 @@ function isUniversallyAllowed(bare) {
     if (bare.startsWith(prefix)) return true;
   }
   return false;
+}
+
+function parsedToolInput(event) {
+  let input = event.tool_input || {};
+  try { if (typeof input === 'string') input = JSON.parse(input); } catch { return event.tool_input; }
+  return input;
+}
+
+function literalPathToken(value) {
+  const token = typeof value === 'string' ? value.trim() : '';
+  if (!token) return '';
+  if (token.startsWith("'") && token.endsWith("'") && !token.slice(1, -1).includes("'")) return token.slice(1, -1);
+  if (token.startsWith('"') && token.endsWith('"') && !/["\`$]/.test(token.slice(1, -1))) return token.slice(1, -1);
+  if (/^[A-Za-z]:[A-Za-z0-9_ .\\/:\-]+$/.test(token) || /^\/[A-Za-z0-9_ ./:\-]+$/.test(token)) return token;
+  return '';
+}
+
+function isInstalledSkillPath(candidate) {
+  if (typeof candidate !== 'string') return false;
+  const normalized = candidate.replace(/\\/g, '/');
+  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return false;
+  if (/(?:^|\/)\.\.(?:\/|$)/.test(normalized)) return false;
+  return /(?:^|\/)\.(?:codex|claude|cursor)\/(?:skills|plugins(?:\/cache)?)\/.+\/SKILL\.md$/i.test(normalized);
+}
+
+// Codex currently loads installed skills through its command bridge. Admit
+// only an exact, literal, read-only command targeting an installed SKILL.md;
+// arbitrary shell remains denied.
+function isInstalledSkillRead(event, bare) {
+  if (!['Bash', 'PowerShell', 'Shell'].includes(bare)) return false;
+  const input = parsedToolInput(event);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const command = typeof input.command === 'string'
+    ? input.command.trim()
+    : (typeof input.cmd === 'string' ? input.cmd.trim() : '');
+  if (!command || command.length > 2000 || /[;&|\r\n<>]/.test(command)) return false;
+  const matches = [
+    command.match(/^Get-Content\s+-Raw\s+-LiteralPath\s+(.+)$/i),
+    command.match(/^Get-Content\s+-LiteralPath\s+(.+?)\s+-Raw$/i),
+    command.match(/^cat\s+(?:--\s+)?(.+)$/),
+  ];
+  const match = matches.find(Boolean);
+  return Boolean(match && isInstalledSkillPath(literalPathToken(match[1])));
+}
+
+function comparableAbsolutePath(candidate) {
+  if (typeof candidate !== 'string') return null;
+  const normalized = candidate.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return null;
+  return /^[A-Za-z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function isTaskOwnedVisualizationPath(candidate, event) {
+  if (typeof candidate !== 'string') return false;
+  const normalized = candidate.replace(/\\/g, '/');
+  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return false;
+  if (/(?:^|\/)\.\.(?:\/|$)/.test(normalized)) return false;
+  if (!/\.(?:html|svg)$/i.test(normalized)) return false;
+  if (!/(?:^|\/)\.(?:codex\/visualizations|claude\/artifacts|cursor\/artifacts)\/.+/i.test(normalized)) return false;
+
+  const target = comparableAbsolutePath(normalized);
+  const roots = [event?.cwd, ...(Array.isArray(event?.workspace_roots) ? event.workspace_roots : []), process.cwd()]
+    .map(comparableAbsolutePath)
+    .filter(Boolean);
+  return !roots.some((root) => target === root || target.startsWith(`${root}/`));
+}
+
+function conversationArtifactPaths(event, bare) {
+  const input = parsedToolInput(event);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    if (!/^(?:functions\.)?apply_patch$/.test(bare) || typeof input !== 'string') return [];
+  }
+  if (['Write', 'Edit'].includes(bare)) {
+    const target = input.file_path || input.path;
+    return typeof target === 'string' ? [target] : [];
+  }
+  if (/^(?:functions\.)?apply_patch$/.test(bare)) {
+    const patchText = typeof input === 'string'
+      ? input
+      : (typeof input.patch === 'string' ? input.patch : input.input);
+    if (typeof patchText !== 'string') return [];
+    const matches = [...patchText.matchAll(/^\*\*\* (Add|Update|Delete) File: (.+)$/gm)];
+    if (matches.length === 0 || matches.some((match) => match[1] === 'Delete')) return [];
+    return matches.map((match) => match[2].trim());
+  }
+  return [];
+}
+
+function isConversationArtifactWrite(event, bare, allowedCategories) {
+  if (!Array.isArray(allowedCategories) || !allowedCategories.includes('conversation_artifact')) return false;
+  const paths = conversationArtifactPaths(event, bare);
+  return paths.length > 0 && paths.every((candidate) => isTaskOwnedVisualizationPath(candidate, event));
 }
 
 // Codex does not adopt the broad local bounded-shell exception. The PR
@@ -650,13 +742,18 @@ async function main() {
   if (!state.active_workflow) return; // No active workflow — allow.
 
   // Universals always pass — Forge orchestration, AskUserQuestion, read-only.
-  if (isUniversallyAllowed(bare) || isPrRevisionRead(event, bare)) return;
+  if (isUniversallyAllowed(bare) || isInstalledSkillRead(event, bare) || isPrRevisionRead(event, bare)) return;
 
   // Layer 1: CHECKPOINT enforcement.
   if (state.pending_checkpoint) {
     deny(buildCheckpointDenyReason(state, bare));
     return;
   }
+
+  // A visualization step may create only its host-owned conversation artifact.
+  // It never receives broad code_edit or shell permission, and repo paths stay
+  // protected by the ordinary category check below.
+  if (isConversationArtifactWrite(event, bare, state.current_step_tools)) return;
 
   // Layer 2: per-step tool_permissions enforcement.
   if (Array.isArray(state.current_step_tools) && state.current_step_tools.length > 0) {
