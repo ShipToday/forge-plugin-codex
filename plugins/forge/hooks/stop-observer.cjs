@@ -125,8 +125,9 @@ async function main() {
     return;
   }
   if (state.status || state.observer_blocked || state.observer_fired) return;
-  // A deferred offer (passive-observation.cjs `defer`) re-arms the fire-once
-  // flags but comes back only after a cooldown, never on the very next Stop.
+  // An observer that already ran this session comes back only after a
+  // cooldown, never on the very next Stop. The client never re-arms an offer:
+  // there is no `defer`, and the user's tracking choice is made in the observer.
   if (state.last_observer_turn != null && turnsSince < CHECKPOINT_INTERVAL) return;
   const active = activeMsFromResolved(resolveSessionRecords(event), Date.parse(state.session_start), now);
   const head = readHeadRef(process.cwd());

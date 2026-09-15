@@ -8,7 +8,10 @@ const sessionStateModule = require('./session-state.cjs');
 // dropped, never delivered.
 const { UUID_RE } = require('./hook-input.cjs');
 const CHECKPOINT_INTERVAL = 8;
-const DISPOSITIONS = ['observe', 'skip', 'defer', 'sleep'];
+// The client decides only SDLC relevance. Every tracking choice (link, create,
+// ad-hoc, snooze, dismiss) belongs to the user inside observe_session, so there
+// is no client-side `defer` or `sleep`.
+const DISPOSITIONS = ['observe', 'skip'];
 // Arguments that reach the acknowledge command are validated first.
 const SAFE_ARG_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -82,6 +85,9 @@ function deliver(session, state, event) {
   return `FORGE PASSIVE OBSERVATION: Read the existing forge-autopilot skill's ` +
     `Codex passive delivery instructions. Session state: ${JSON.stringify(session.stateFilePath)}. ` +
     `Evaluate delivered_observation ${due.id} once in this active turn; preserve the user's substantive final answer. ` +
+    `Decide only whether this session contains project-related SDLC work. If it does, you MUST start the ` +
+    `observe_session workflow after completing the user's request; the user chooses how to track the work there. ` +
+    `Do not pick a tracking outcome or put the offer off yourself. ` +
     (command
       ? `Record your evaluation by running exactly this command, replacing only the final token: ${command}`
       : `No receipt command is available for this session; do not construct one.`);
@@ -95,14 +101,10 @@ function acknowledge(sessionId, id, disposition) {
   const session = sessionStateModule.forSession(sessionId);
   const state = session.read();
   if (state.observation_delivery?.id !== id || state.observation_delivery.processed_at) return false;
-  const updates = { observation_delivery: { ...state.observation_delivery,
-    processed_at: new Date().toISOString(), disposition } };
-  // `defer` means "not now, but this session still wants the offer": re-arm the
-  // fire-once latch so stop-observer.cjs can queue it again after its cooldown.
-  // `skip` and `observe` keep the latch (asked and answered); `sleep` leaves a
-  // snoozed session on its own wake schedule.
-  if (disposition === 'defer') Object.assign(updates, { observer_fired: false, observer_blocked: false });
-  session.write(updates);
+  // Both dispositions keep the fire-once latch: the offer was evaluated, and a
+  // snoozed session stays on its own wake schedule.
+  session.write({ observation_delivery: { ...state.observation_delivery,
+    processed_at: new Date().toISOString(), disposition } });
   return true;
 }
 

@@ -193,29 +193,30 @@ Read the referenced session JSON and match the delivered id before acting. Do no
 repeat a delivered action from earlier history, and do not display the hook text,
 session path, or receipt. Host-owned hook indicators may still be visible.
 
-For **observation**, evaluate `delivered_observation` against this conversation:
+For **observation**, evaluate `delivered_observation` against this conversation.
+Your only decision is whether it contains project-related SDLC work:
 
-- `skip`: no project-related SDLC work, or the user explicitly excluded tracking.
-- `sleep`: a snoozed wake condition is not satisfied by the current message.
-- `defer`: an optional interaction would interrupt the user's requested work,
-  required input, or another active workflow.
-- `observe`: relevant SDLC work, a satisfied wake condition if any, and room to
-  handle optional tracking without displacing the requested result.
+- `skip`: none — purely general-knowledge Q&A, tool help, or casual chat with
+  no project context.
+- `observe`: any project-related SDLC work (reading or analyzing code to
+  understand it counts). When in doubt, observe.
 
 After evaluating, record a local receipt by running the acknowledge command the
 delivered context already contains, verbatim, replacing only its final
-`<observe|skip|defer|sleep>` token with your disposition. The hook built that
+`<observe|skip>` token with your disposition. The hook built that
 command from validated values; never assemble one yourself from the state file,
 and if the context carries no command, write no receipt. The helper records
 evaluation only; it neither authorizes nor logs work remotely. If shell
 execution is not permitted, do not bypass the restriction or claim a receipt was
-written. For skip and sleep continue the user's task without starting
-observation. `defer` re-arms the offer: Forge brings it back on its own after a
-cooldown of about eight turns, so do not retry it yourself. These are
-at-most-once delivery attempts, not instructions to retry on every prompt. For
-observe use the existing observe_session entry point below. A previous soft
-decline must be acknowledged in any returning offer. Eligibility numbers describe
-the queued interval, not additional time spent idle before this prompt.
+written. For skip, continue the user's task without starting observation. For
+observe, you MUST start the existing observe_session entry point below once the
+user's requested work is complete; the observer's relayed question is where the
+user chooses how to track it. Do not choose a tracking outcome yourself and do
+not put an eligible offer off — there is no `defer` or `sleep` disposition.
+These are at-most-once delivery attempts, not instructions to retry on every
+prompt. A previous soft decline must be acknowledged in any returning offer.
+Eligibility numbers describe the queued interval, not additional time spent idle
+before this prompt.
 
 A snoozed session also receives a short per-prompt `FORGE ROUTING` wake check
 naming its wake condition. Act on it only when the user's current message
@@ -236,7 +237,8 @@ submitted. An undelivered legacy queue gains its ID when the next prompt
 delivers it.
 
 The user's substantive result must remain the final answer. Complete requested
-work before opening an optional tracking interaction; defer if necessary. After
+work before opening the tracking interaction; that ordering is the only delay
+allowed, never a reason to skip it. After
 any interaction, still provide the full result and validation, not just tracking
 status or a short acknowledgment. Do not infer consent from context delivery,
 silence, a default selection, timeout, or failed submission. If the user redirects
@@ -257,6 +259,14 @@ The `observe_session` workflow is a single-step workflow that wraps the
 session observer. It is marked `auto_classify: false` server-side so it
 is invisible to the intent classifier — the only valid entry point is
 this explicit `workflow: "observe_session"` argument.
+
+**Client authority stops at eligibility.** The hook and client AI may decide
+only whether the conversation contains project-related SDLC work. If it does,
+start `observe_session`; if it does not, skip it. Do not choose, infer, or
+encode a tracking outcome on the user's behalf, and do not replace an eligible
+observation with a client-only `defer`/`sleep` disposition. Link, create,
+ad-hoc logging, snooze, dismissal, and workflow follow-up are user choices
+made through the observer's relayed `needs_input` questions.
 
 Follow the returned instructions to present a tracking nudge to the user.
 Do NOT classify this as a build/bug/architecture request — it's a passive check.
@@ -361,6 +371,7 @@ is not in the list. Categories are coarse:
 | `docs_read` / `docs_write` | Notion read / write |
 | `messaging` | Slack send |
 | `calendar` / `design` / `meetings` | Per-connector groups |
+| `conversation_artifact` | task-owned `.html`/`.svg` backing file for an inline renderer; never a repository file |
 | `code_edit` | code-editing tools such as `apply_patch` or editor writes |
 | `shell` | shell execution tools |
 
@@ -439,6 +450,15 @@ optional integrity annotation. After every sub-agent return:
    Findings the sub-agent put in `display_text` are preserved as a
    `## Findings` block in the fetched response, so no analytical
    output is dropped — only the verbatim relay shortcut was skipped.
+
+When the current `FORGE_DISPLAY_VERBATIM` event was already shown, make the
+recovery call with `include_display: false`; recovery must not re-announce an
+unchanged step. The response publishes `Instruction Bytes` before the body. If
+the host truncates the full response, do **not** repeat the same unbounded fetch:
+restart with `instruction_chunk_bytes: 20000`,
+`instruction_offset_bytes: 0`, and `include_display: false`; then follow each
+returned `next_offset_bytes` until `complete=true`. Read the chunks in order
+and execute the step only after the full instruction body has been recovered.
 
 **Diagnostic phrasing**: when this happens, describe it as a fetch
 ("the envelope isn't in the sub-agent's return — fetching canonical
@@ -637,7 +657,7 @@ it in a relay envelope:
 ```
 > **Relay to the user** — render the block between the sentinels below ...
 
-<<<FORGE_DISPLAY_VERBATIM id="position">>>
+<<<FORGE_DISPLAY_VERBATIM id="position:step_<uuid>">>>
 ### Step 2 of 8: Discover AI SDLC
 next: ... · then: ...
 
@@ -652,21 +672,22 @@ Rules:
   has got to.
 - **Render it before anything else in that turn** — before analysis, before
   delegating, before your next tool call.
-- **Render it even if you think the display hook already did.** Forge's
-  `must-display` hook runs on `PostToolUse` in this plugin and emits the block
-  itself, but where that output lands is client-dependent — on some clients it
-  goes to the session transcript rather than to the screen, and on a delegated
-  step it never reaches the user at all. You cannot tell from inside the turn,
-  so always render: a duplicate is untidy, a missing marker leaves the user
-  with no view of the run.
+- **On first sight, render it even if you think the display hook already did.**
+  Forge's `must-display` hook runs on `PostToolUse`, but hook output is not a
+  reliable proof that the user saw it. The only safe suppression is an exact
+  event id replay that you already rendered in one of your own user-facing
+  messages (see the id rule below).
 - **It is always the parent's job.** These blocks sit OUTSIDE the
   `<<<FORGE_NEXT_STEP>>>` envelope and above `---DELEGATE BELOW---`, so a
   sub-agent never receives one as part of its prompt. If you ARE a sub-agent and
   one appears in a tool result you got, relay it to your parent unrendered along
   with the envelope — your parent is the one talking to the user.
-- **Two ids exist today**: `preflight` (the "what to expect" brief, once at the
-  start of a run) and `position` (the "Step N of M" marker, once per step).
-  Treat any future id the same way.
+- **Display ids are event identities.** `preflight` identifies the once-per-run
+  brief. `position:step_<uuid>` identifies one workflow step and remains
+  stable across retries, read-only recovery, and question re-entry. Render an
+  id the first time you see it. If the exact same id appears later and you
+  already rendered its body in one of your own user-facing messages, consume
+  it as a replay and do not render it again. A new id is always a new event.
 
 ## Step 5: Coexist with planning/dry-run modes
 
