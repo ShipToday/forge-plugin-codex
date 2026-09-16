@@ -82,7 +82,7 @@ function literalInput(tokens, start) {
   }
   try {
     const input = value();
-    return tokens[index] === ')' && input && typeof input === 'object' ? input : null;
+    return tokens[index] === ')' && input && typeof input === 'object' ? { input, end: index } : null;
   } catch { return null; }
 }
 
@@ -116,11 +116,22 @@ function normalizeToolEvent(event) {
   }
   if (callIndex === -1 || !FORGE_TOOL.test(tokens[callIndex + 2])
     || !isTopLevelAwait(tokens, callIndex) || responseHasError(event.tool_response)) return null;
-  const input = literalInput(tokens, callIndex + 4);
-  if (!input) return null;
+  const parsed = literalInput(tokens, callIndex + 4);
+  if (!parsed) return null;
+  const prefix = tokens.slice(0, callIndex);
+  const suffix = tokens.slice(parsed.end + 1);
+  if (suffix.at(-1) === ';') suffix.pop();
+  // Recovery may release a conservative guard. Only an exact passthrough can
+  // attribute outer exec output to the nested tool; no transforms, reassignment,
+  // extra output, or model-authored snapshot text are allowed.
+  const inline = prefix.join(' ') === 'text ( await' && suffix.join(' ') === ')';
+  const variable = prefix.length === 4 && prefix[0] === 'const'
+    && /^[A-Za-z_$][\w$]*$/.test(prefix[1]) && prefix[2] === '=' && prefix[3] === 'await'
+    && suffix.join(' ') === `; text ( ${prefix[1]} )`;
   const text = responseText(event.tool_response);
   if (!/(?:\*\*(?:CHECKPOINT|RE-ENTRY|NEXT STEP|Workflow abandoned)\*\*|Conversation ID|Step "[^"]+" completed\.|Skill \*\*\w+\*\* completed\.)/.test(text)) return null;
-  return { ...event, tool_name: tokens[callIndex + 2], tool_input: input, tool_response: text };
+  return { ...event, tool_name: tokens[callIndex + 2], tool_input: parsed.input, tool_response: text,
+    forge_wrapped_response: true, forge_response_passthrough: inline || variable };
 }
 
 module.exports = { normalizeToolEvent, responseText };

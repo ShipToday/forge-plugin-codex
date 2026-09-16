@@ -31,6 +31,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { processIdentity } = require('./process-identity.cjs');
+let ownIdentity;
 
 // -- Constants ---------------------------------------------------------------
 
@@ -49,6 +51,11 @@ const LOCK_MAX_WAIT_MS = 750;
 const STALE_LOCK_MS = 5 * 1000;
 const PARSE_RETRIES = 4;
 const CORRUPT_STATE = Symbol('corrupt state');
+// libuv's Windows exclusive sharing flag (Node 18+ deps/uv/include/uv/win.h).
+// Node accepts integer open flags but does not export this constant. The OS
+// releases the handle when its process dies, independently of PID reuse.
+const WINDOWS_EXLOCK = 0x10000000;
+
 
 function waitBriefly(ms) {
   // Atomics.wait avoids a subprocess and works in the Node main thread.
@@ -130,10 +137,9 @@ function statePath(sessionId) {
 
 function ensureDir() {
   if (!fs.existsSync(STATE_DIR)) {
-    // Codex: owner-private where the platform honours modes (POSIX; ignored on
-    // Windows).
     fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   }
+  if (process.platform !== 'win32') fs.chmodSync(STATE_DIR, 0o700);
 }
 
 // Codex: rename-over on Windows fails with EPERM (EACCES/EBUSY on some
@@ -275,11 +281,9 @@ function cleanupStale() {
     const files = fs.readdirSync(STATE_DIR);
     const now = Date.now();
     for (const file of files) {
+      if (cleanupLease(file, now)) continue;
       if (cleanupLockCandidate(file, now)) continue;
-      // .tmp: a write interrupted before its rename. .display: must-display's
-      // per-session breadcrumb sidecar (kept out of the state file so the two
-      // PostToolUse hooks never contend for one write).
-      if (!file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.display') && !file.endsWith('.attempt') && !file.endsWith('.corrupt')) continue;
+      if (!file.endsWith('.json') && !file.endsWith('.corrupt') && !file.endsWith('.tmp') && !file.endsWith('.display') && !file.endsWith('.attempt')) continue;
       const fp = path.join(STATE_DIR, file);
       const stat = fs.statSync(fp);
       if (now - stat.mtimeMs > CLEANUP_AGE_MS) {
@@ -289,6 +293,18 @@ function cleanupStale() {
   } catch {
     // Best-effort cleanup — never block
   }
+}
+
+function cleanupLease(file, now) {
+  if (process.platform !== 'win32' || !/\.json\.lock-owner-[1-9]\d*-[0-9a-f-]{36}\.lease$/.test(file)) return false;
+  try {
+    const leasePath = path.join(STATE_DIR, file);
+    if (now - fs.statSync(leasePath).mtimeMs <= CLEANUP_AGE_MS) return true;
+    const lease = fs.openSync(leasePath, fs.constants.O_RDWR | WINDOWS_EXLOCK);
+    fs.closeSync(lease);
+    fs.unlinkSync(leasePath);
+  } catch { /* live owner or concurrent cleanup */ }
+  return true;
 }
 
 // Candidate names are private to one owner. Never recursively remove a shared
@@ -343,8 +359,22 @@ function forSession(sessionId) {
     const lockPath = `${fp}.lock`;
     const owner = `owner-${process.pid}-${crypto.randomUUID()}`;
     const candidate = `${lockPath}-${owner}`;
+    const leasePath = `${candidate}.lease`;
+    let lease;
+    if (ownIdentity === undefined) ownIdentity = processIdentity(process.pid);
     fs.mkdirSync(candidate, { mode: 0o700 });
-    fs.writeFileSync(path.join(candidate, owner), '', { flag: 'wx', mode: 0o600 });
+    try {
+      if (process.platform === 'win32') lease = fs.openSync(leasePath,
+        fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | WINDOWS_EXLOCK, 0o600);
+      fs.writeFileSync(path.join(candidate, owner), JSON.stringify({ birth: ownIdentity, lease: lease !== undefined }), { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if (lease !== undefined) fs.closeSync(lease);
+      try { fs.unlinkSync(leasePath); } catch { /* absent */ }
+      try { fs.unlinkSync(path.join(candidate, owner)); } catch { /* absent */ }
+      try { fs.rmdirSync(candidate); } catch { /* preserve unexpected contents */ }
+      throw error;
+    }
+    const identities = new Map();
     const deadline = Date.now() + LOCK_MAX_WAIT_MS;
     let acquired = false;
     try {
@@ -362,13 +392,18 @@ function forSession(sessionId) {
           acquired = true;
         } catch (error) {
           if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error.code)) throw error;
-          recoverLock(lockPath);
-          if (Date.now() >= deadline) throw new Error('Timed out acquiring Forge session-state lock');
+          recoverLock(lockPath, identities);
+          if (Date.now() >= deadline) {
+            process.stderr.write('Forge session state was not saved: a live or unverifiable lock owner exceeded the 750 ms wait. Restart a stuck hook/session before retrying.\n');
+            throw new Error('Timed out acquiring Forge session-state lock');
+          }
           waitBriefly(LOCK_RETRY_MS);
         }
       }
       return action();
     } finally {
+      // All protected writes finish before releasing the kernel lease.
+      if (lease !== undefined) fs.closeSync(lease);
       const directory = acquired ? lockPath : candidate;
       // Exact ownership removal protects a successor from a delayed releaser
       // or a second reaper. Never recursively delete the shared lock path.
@@ -376,10 +411,11 @@ function forSession(sessionId) {
         fs.unlinkSync(path.join(directory, owner));
         fs.rmdirSync(directory);
       } catch { /* another owner may already have published its nonempty lock */ }
+      try { fs.unlinkSync(leasePath); } catch { /* a reaper may hold it */ }
     }
   }
 
-  function recoverLock(lockPath) {
+  function recoverLock(lockPath, identities) {
     try {
       const entries = fs.readdirSync(lockPath);
       if (entries.length === 0) {
@@ -392,9 +428,34 @@ function forSession(sessionId) {
       if (entries.length !== 1) return false;
       const match = /^owner-([1-9]\d*)-[0-9a-f-]{36}$/.exec(entries[0]);
       if (!match || !Number.isSafeInteger(Number(match[1]))) return false;
+      let record;
+      try { record = JSON.parse(fs.readFileSync(path.join(lockPath, entries[0]), 'utf8')); } catch { /* legacy owner marker */ }
+      if (process.platform === 'win32' && record?.lease === true) {
+        const leasePath = `${lockPath}-${entries[0]}.lease`;
+        let lease;
+        try {
+          // Exclusive open fails while even a paused original writer owns it.
+          lease = fs.openSync(leasePath, fs.constants.O_RDWR | WINDOWS_EXLOCK);
+        } catch (error) {
+          if (error.code !== 'ENOENT') return false;
+          // The releaser removed the sidecar after finishing its writes.
+        }
+        try {
+          fs.unlinkSync(path.join(lockPath, entries[0]));
+          try { fs.rmdirSync(lockPath); } catch { /* successor or concurrent reaper */ }
+        } finally {
+          if (lease !== undefined) fs.closeSync(lease);
+          try { fs.unlinkSync(leasePath); } catch { /* another reaper */ }
+        }
+        return true;
+      }
       try {
         process.kill(Number(match[1]), 0);
-        return false;
+        const recorded = record?.birth;
+        if (typeof recorded !== 'string' || !recorded) return false;
+        if (!identities.has(entries[0])) identities.set(entries[0], processIdentity(Number(match[1])));
+        const current = identities.get(entries[0]);
+        if (!current || current === recorded) return false;
       } catch (error) {
         if (error.code !== 'ESRCH') return false;
       }
@@ -427,14 +488,19 @@ function forSession(sessionId) {
     if (strict) {
       // Preserve evidence BEFORE atomic replacement. Moving fp away would let
       // readers (or a crash) see a missing file and silently drop enforcement.
-      fs.copyFileSync(fp, `${fp}.${crypto.randomUUID()}.corrupt`, fs.constants.COPYFILE_EXCL);
+      fs.writeFileSync(`${fp}.${crypto.randomUUID()}.corrupt`, fs.readFileSync(fp), { flag: 'wx', mode: 0o600 });
     }
     return strict ? recoveryState() : CORRUPT_STATE;
   }
 
   function recoveryState() {
     return { ...freshState(sessionId), active_workflow: true,
-      pending_checkpoint: true, state_recovery_required: true };
+      pending_checkpoint: true, state_recovery_required: true, state_recovery_started_at: new Date().toISOString() };
+  }
+
+  function recoveryExpired(state) {
+    const since = Date.parse(state.state_recovery_started_at || state.session_start);
+    return Number.isFinite(since) && Date.now() - since > TTL_MS;
   }
 
   // The write path reads under the lock, bypassing read(), so it must apply the
@@ -445,7 +511,7 @@ function forSession(sessionId) {
   // quarantine or silently remove enforcement.
   function readForWrite() {
     const state = parseExisting(true);
-    if (state && state.state_recovery_required) return state;
+    if (state && state.state_recovery_required) return recoveryExpired(state) ? freshState(sessionId) : state;
     try {
       if (Date.now() - fs.statSync(fp).mtimeMs > TTL_MS) return freshState(sessionId);
     } catch {
@@ -486,7 +552,7 @@ function forSession(sessionId) {
         });
       }
       if (!state) return freshState(sessionId);
-      if (state.state_recovery_required) return state;
+      if (state.state_recovery_required) return recoveryExpired(state) ? freshState(sessionId) : state;
 
       // Staleness is measured from the last WRITE (file mtime), not from
       // session_start — a sliding idle window rather than an absolute cap.

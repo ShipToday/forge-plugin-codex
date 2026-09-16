@@ -417,6 +417,9 @@ async function main() {
   const toolName = event.tool_name || '';
   const toolResponse = event.tool_response || '';
 
+  if (event.forge_wrapped_response && !event.forge_response_passthrough
+    && sessionState.read().state_recovery_required) return;
+
   // Codex: a failed tool must not acknowledge passive delivery or clear guards.
   // Scoped to the response-driven branches below — the start_workflow preflight
   // branch still needs to run for a failed start, which is exactly when the
