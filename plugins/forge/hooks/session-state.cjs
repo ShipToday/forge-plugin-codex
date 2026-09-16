@@ -41,6 +41,20 @@ const STATE_DIR = path.join(os.tmpdir(), 'forge-observer');
 const TTL_MS = 4 * 60 * 60 * 1000;       // 4 hours idle
 const CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours — auto-clean stale files
 
+// Hooks are separate processes and PostToolUse hooks can run concurrently.
+// A directory is an atomic cross-process mutex on Windows and POSIX. Keep the
+// wait bounded: never stall a host indefinitely or steal a live owner's lock.
+const LOCK_RETRY_MS = 10;
+const LOCK_MAX_WAIT_MS = 750;
+const STALE_LOCK_MS = 5 * 1000;
+const PARSE_RETRIES = 4;
+const CORRUPT_STATE = Symbol('corrupt state');
+
+function waitBriefly(ms) {
+  // Atomics.wait avoids a subprocess and works in the Node main thread.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 // -- Helpers -----------------------------------------------------------------
 
 // TEMPORARY DIAGNOSTIC — remove once the cwd-change trigger is identified.
@@ -261,10 +275,11 @@ function cleanupStale() {
     const files = fs.readdirSync(STATE_DIR);
     const now = Date.now();
     for (const file of files) {
+      if (cleanupLockCandidate(file, now)) continue;
       // .tmp: a write interrupted before its rename. .display: must-display's
       // per-session breadcrumb sidecar (kept out of the state file so the two
       // PostToolUse hooks never contend for one write).
-      if (!file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.display') && !file.endsWith('.attempt')) continue;
+      if (!file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.display') && !file.endsWith('.attempt') && !file.endsWith('.corrupt')) continue;
       const fp = path.join(STATE_DIR, file);
       const stat = fs.statSync(fp);
       if (now - stat.mtimeMs > CLEANUP_AGE_MS) {
@@ -274,6 +289,27 @@ function cleanupStale() {
   } catch {
     // Best-effort cleanup — never block
   }
+}
+
+// Candidate names are private to one owner. Never recursively remove a shared
+// lock, a live owner's candidate, or a directory with unexpected contents.
+function cleanupLockCandidate(file, now) {
+  const match = /\.json\.lock-(owner-([1-9]\d*)-[0-9a-f-]{36})$/.exec(file);
+  if (!match) return false;
+  try {
+    const candidate = path.join(STATE_DIR, file);
+    if (now - fs.statSync(candidate).mtimeMs <= CLEANUP_AGE_MS) return true;
+    const pid = Number(match[2]);
+    if (!Number.isSafeInteger(pid)) return true;
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code !== 'ESRCH') return true; }
+    const entries = fs.readdirSync(candidate);
+    if (entries.length === 1 && entries[0] === match[1]) {
+      fs.unlinkSync(path.join(candidate, match[1]));
+    } else if (entries.length !== 0) return true;
+    fs.rmdirSync(candidate);
+  } catch { /* best effort; another hook may have removed it */ }
+  return true;
 }
 
 // -- Public API --------------------------------------------------------------
@@ -303,33 +339,119 @@ function forSession(sessionId) {
   const fp = statePath(sessionId);
 
   function withLock(action) {
-    const lock = `${fp}.lock`; const deadline = Date.now() + 750;
-    while (true) {
-      try { fs.mkdirSync(lock); break; } catch (error) {
-        if (error?.code !== 'EEXIST') throw error;
-        try { if (Date.now() - fs.statSync(lock).mtimeMs > 5000) { fs.rmSync(lock, { recursive: true, force: true }); continue; } } catch { /* released concurrently */ }
-        if (Date.now() >= deadline) throw new Error('Timed out acquiring Forge session-state lock');
-        sleepSync(10);
+    ensureDir();
+    const lockPath = `${fp}.lock`;
+    const owner = `owner-${process.pid}-${crypto.randomUUID()}`;
+    const candidate = `${lockPath}-${owner}`;
+    fs.mkdirSync(candidate, { mode: 0o700 });
+    fs.writeFileSync(path.join(candidate, owner), '', { flag: 'wx', mode: 0o600 });
+    const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+    let acquired = false;
+    try {
+      while (!acquired) {
+        try {
+          // Publish ownership AND the mutex atomically. A live lock is always
+          // nonempty, so rename cannot replace it on Windows or POSIX.
+          // Do not replace an empty legacy lock while an old hook may own it.
+          if (fs.existsSync(lockPath)) {
+            const error = new Error('Session state lock is occupied');
+            error.code = 'EEXIST';
+            throw error;
+          }
+          fs.renameSync(candidate, lockPath);
+          acquired = true;
+        } catch (error) {
+          if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+          recoverLock(lockPath);
+          if (Date.now() >= deadline) throw new Error('Timed out acquiring Forge session-state lock');
+          waitBriefly(LOCK_RETRY_MS);
+        }
       }
+      return action();
+    } finally {
+      const directory = acquired ? lockPath : candidate;
+      // Exact ownership removal protects a successor from a delayed releaser
+      // or a second reaper. Never recursively delete the shared lock path.
+      try {
+        fs.unlinkSync(path.join(directory, owner));
+        fs.rmdirSync(directory);
+      } catch { /* another owner may already have published its nonempty lock */ }
     }
-    try { return action(); } finally { try { fs.rmdirSync(lock); } catch { /* best effort */ } }
   }
 
-  // Same idle expiry as read(): the first write after the idle window must not
-  // merge into, and so revive, the dead session's workflow, CHECKPOINT pin and
-  // allowlist. An expired file is replaced even when unreadable.
-  function readForWrite() {
-    try { if (Date.now() - fs.statSync(fp).mtimeMs > TTL_MS) return freshState(sessionId); } catch { /* no file yet */ }
-    if (!fs.existsSync(fp)) return freshState(sessionId);
-    let last;
-    for (let i = 0; i < 4; i += 1) {
-      try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch (error) { last = error; sleepSync(10); }
+  function recoverLock(lockPath) {
+    try {
+      const entries = fs.readdirSync(lockPath);
+      if (entries.length === 0) {
+        // Compatibility only: old hook versions published ownerless locks.
+        // Preserve their existing grace period; new locks never have this gap.
+        if (Date.now() - fs.statSync(lockPath).mtimeMs <= STALE_LOCK_MS) return false;
+        fs.rmdirSync(lockPath);
+        return true;
+      }
+      if (entries.length !== 1) return false;
+      const match = /^owner-([1-9]\d*)-[0-9a-f-]{36}$/.exec(entries[0]);
+      if (!match || !Number.isSafeInteger(Number(match[1]))) return false;
+      try {
+        process.kill(Number(match[1]), 0);
+        return false;
+      } catch (error) {
+        if (error.code !== 'ESRCH') return false;
+      }
+      // Only the reaper that removed this unique marker may remove the empty
+      // directory. A successor's marker makes rmdir fail harmlessly.
+      fs.unlinkSync(path.join(lockPath, entries[0]));
+      try { fs.rmdirSync(lockPath); } catch { /* successor or concurrent reaper */ }
+      return true;
+    } catch (error) {
+      return error.code === 'ENOENT';
     }
-    throw new Error(`Forge session state is unreadable; refusing to overwrite it: ${last?.message || 'parse failure'}`);
   }
 
   function writeRaw(state) {
+    ensureDir();
     writeFileAtomic(fp, JSON.stringify(state, null, 2));
+  }
+
+  function parseExisting(strict) {
+    if (!fs.existsSync(fp)) return null;
+    for (let i = 0; i < PARSE_RETRIES; i += 1) {
+      try {
+        const state = JSON.parse(fs.readFileSync(fp, 'utf8'));
+        if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Expected a state object');
+        return state;
+      } catch (error) {
+        waitBriefly(LOCK_RETRY_MS);
+      }
+    }
+    if (strict) {
+      // Preserve evidence BEFORE atomic replacement. Moving fp away would let
+      // readers (or a crash) see a missing file and silently drop enforcement.
+      fs.copyFileSync(fp, `${fp}.${crypto.randomUUID()}.corrupt`, fs.constants.COPYFILE_EXCL);
+    }
+    return strict ? recoveryState() : CORRUPT_STATE;
+  }
+
+  function recoveryState() {
+    return { ...freshState(sessionId), active_workflow: true,
+      pending_checkpoint: true, state_recovery_required: true };
+  }
+
+  // The write path reads under the lock, bypassing read(), so it must apply the
+  // same idle expiry. Otherwise the first hook write after the idle window
+  // merges into the dead session and refreshes its mtime, reviving the
+  // active_workflow, CHECKPOINT pin and per-step allowlist that read() had
+  // already reported gone. Validate before expiry so corruption cannot bypass
+  // quarantine or silently remove enforcement.
+  function readForWrite() {
+    const state = parseExisting(true);
+    if (state && state.state_recovery_required) return state;
+    try {
+      if (Date.now() - fs.statSync(fp).mtimeMs > TTL_MS) return freshState(sessionId);
+    } catch {
+      // No file yet — parseExisting reports that as null.
+    }
+    return state || freshState(sessionId);
   }
 
   /**
@@ -338,14 +460,14 @@ function forSession(sessionId) {
    * IDLE longer than TTL_MS. Also triggers cleanup of files older than
    * CLEANUP_AGE_MS.
    *
-   * Pure read — never persists. A read that materialised state made "never
+   * An ordinary read never persists. A read that materialised state made "never
    * seen this session" indistinguishable from "seen it, and it says no
    * workflow is running": a hook firing under a new key did not merely miss the
    * state, it wrote a decoy that then looked like a legitimate fresh session.
    * That is what made a re-key silently disable token capture and the guard's
    * per-step allowlist rather than surfacing as an error. The file is now
-   * created by the first write() instead, so an absent file means exactly
-   * that, and callers can tell the two apart.
+   * created by the first write() instead. A corrupt existing file is repaired
+   * under the mutex, with a quarantine copy and a conservative recovery pin.
    */
   function read() {
     ensureDir();
@@ -354,8 +476,17 @@ function forSession(sessionId) {
     if (!fs.existsSync(fp)) return freshState(sessionId);
 
     try {
-      const raw = fs.readFileSync(fp, 'utf8');
-      const state = JSON.parse(raw);
+      const state = parseExisting(false);
+      if (state === CORRUPT_STATE) {
+        return withLock(() => {
+          // Re-read under the mutex: another hook may already have repaired it.
+          const repaired = readForWrite();
+          writeRaw(repaired);
+          return repaired;
+        });
+      }
+      if (!state) return freshState(sessionId);
+      if (state.state_recovery_required) return state;
 
       // Staleness is measured from the last WRITE (file mtime), not from
       // session_start — a sliding idle window rather than an absolute cap.
@@ -386,8 +517,8 @@ function forSession(sessionId) {
 
       return state;
     } catch {
-      // Corrupted file — start fresh (still without persisting).
-      return freshState(sessionId);
+      // An unreadable active state is not evidence that enforcement ended.
+      return recoveryState();
     }
   }
 
@@ -395,8 +526,19 @@ function forSession(sessionId) {
    * Merge updates into this session's state and persist.
    * @param {Object} updates — fields to merge (shallow)
    */
-  function write(updates) {
-    return withLock(() => { const state = readForWrite(); Object.assign(state, updates); writeRaw(state); return state; });
+  function write(updates, { onlyIfRecoveryRequired = false } = {}) {
+    return withLock(() => {
+      // Read after acquiring the lock. This is the read-modify-write boundary:
+      // independent hook updates (counters, arrays and unrelated fields) are
+      // merged with the latest durable state instead of clobbering each other.
+      const state = readForWrite();
+      if (onlyIfRecoveryRequired && !state.state_recovery_required) return state;
+      const recovering = state.state_recovery_required && updates.state_recovery_required !== false;
+      Object.assign(state, updates);
+      if (recovering) Object.assign(state, { active_workflow: true, pending_checkpoint: true, state_recovery_required: true });
+      writeRaw(state);
+      return state;
+    });
   }
 
   /**
@@ -404,7 +546,12 @@ function forSession(sessionId) {
    * @param {string} field — the field name to increment
    */
   function increment(field) {
-    return withLock(() => { const state = readForWrite(); state[field] = (state[field] || 0) + 1; writeRaw(state); return state; });
+    return withLock(() => {
+      const state = readForWrite();
+      state[field] = (state[field] || 0) + 1;
+      writeRaw(state);
+      return state;
+    });
   }
 
   return { read, write, increment, stateFilePath: fp };

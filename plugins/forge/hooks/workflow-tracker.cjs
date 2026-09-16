@@ -39,6 +39,7 @@ const WORKFLOW_START_PATTERNS = [
 
 const WORKFLOW_STATE_PATTERN = 'forge__update_state';
 const WORKFLOW_ABANDON_PATTERN = 'forge__abandon_workflow';
+const WORKFLOW_RECOVERY_PATTERN = /(?:^|__)forge__get_workflow_state$/;
 
 // -- Helpers ------------------------------------------------------------------
 
@@ -72,6 +73,74 @@ function responseText(response) {
       .join('\n');
   }
   return JSON.stringify(response);
+}
+
+// A recovery response has a fixed server-owned preamble. Findings and step
+// instructions can themselves quote workflow markers, so they are never a
+// source of identity, permissions, or question metadata.
+function recoveryUpdates(event) {
+  let input = event.tool_input;
+  try { if (typeof input === 'string') input = JSON.parse(input); } catch { return null; }
+  if (!input || typeof input.conversation_id !== 'string' || event.tool_response?.isError) return null;
+  const text = responseText(event.tool_response).trim().replace(/\r\n/g, '\n');
+  const prefix = text.match(/^Workflow state for conversation `([^`\n]+)` — read-only snapshot\.\n\n/);
+  if (!prefix || prefix[1] !== input.conversation_id) return null;
+  const rest = text.slice(prefix[0].length);
+  const header = rest.split('\n\n', 1)[0];
+  const checkpoint = header.match(/^\*\*CHECKPOINT\*\* — "([^"\n]+)" awaiting user input\. Read-only recovery; no question was submitted\./);
+  const next = header.match(/^\*\*NEXT STEP\*\*: "([^"\n]+)" — follow the instructions below\. Do NOT skip this step\./);
+  const token = header.match(/^\*\*Step Token\*\*: `([^`\n]+)`/m)?.[1];
+  if ((!checkpoint && !next) || !token) return null;
+  const step = (checkpoint || next)[1];
+  const permissions = extractToolPermissions(header);
+  let pending = Boolean(checkpoint);
+  if (!pending) {
+    // Inspect a complete canonical body only for legacy hold evidence. A
+    // chunk cannot prove the rest of an old gate body contains no hold.
+    const envelope = rest.match(/<<<FORGE_NEXT_STEP token="([^"\n]+)" bytes=(\d+)>>>\n([\s\S]*?)\n<<<END FORGE_NEXT_STEP>>>/);
+    if (!envelope || envelope[1] !== token || Buffer.byteLength(envelope[3], 'utf8') !== Number(envelope[2])) return null;
+    const body = envelope[3].replace(/<<<FORGE_DISPLAY_VERBATIM[^\n]*>>>[\s\S]*?<<<END FORGE_DISPLAY_VERBATIM>>>/g, '');
+    pending = /^(?:\*\*CHECKPOINT\*\*\s+—|## CHECKPOINT — (?:Step confirmation gate|Feedback at the confirmation gate)|Workflow paused after "[^"\n]+"\. The confirmation gate is still pending\.)/m.test(body);
+  }
+  if (!pending && !permissions?.length) return null;
+  return {
+    state_recovery_required: false,
+    active_workflow: true,
+    conversation_id: prefix[1],
+    current_step_skill: step,
+    current_step_tools: permissions,
+    pending_checkpoint: pending,
+    pending_checkpoint_step: pending ? step : null,
+    pending_checkpoint_at: pending ? new Date().toISOString() : null,
+    // Recovery's plain-text postback lives inside user-facing instructions;
+    // leave unknown identity fields unset rather than infer them from prose.
+    pending_checkpoint_question_id: null,
+    pending_checkpoint_response_field: null,
+  };
+}
+
+// Only a server lifecycle header can retire the synthetic corruption hold.
+// Ordinary hook bookkeeping and error responses must leave it sticky.
+function lifecycleRecoveryUpdates(event) {
+  if (event.tool_response?.isError) return {};
+  const text = responseText(event.tool_response).trim().replace(/\r\n/g, '\n');
+  if (/^(?:Error:|Failed to )/.test(text)) return {};
+  const lines = [];
+  for (const line of text.split('\n')) {
+    if (line && !/^(?:\*\*(?:CHECKPOINT|RE-ENTRY|NEXT STEP|Model Routing|Tool Permissions|Step Token|Idempotent Retry|Question ID|Response Field)\*\*|Step "[^"\n]+" completed\. \(\d+\/\d+\)|Skill \*\*\w+\*\* completed\.)/.test(line)) break;
+    lines.push(line);
+  }
+  const leading = lines.join('\n');
+  if (!/^(?:\*\*(?:CHECKPOINT|RE-ENTRY|NEXT STEP)\*\*|Step "[^"\n]+" completed\. \(\d+\/\d+\)|Skill \*\*\w+\*\* completed\.)/.test(leading)) return {};
+  let input = event.tool_input;
+  try { if (typeof input === 'string') input = JSON.parse(input); } catch { input = null; }
+  return {
+    state_recovery_required: false,
+    active_workflow: true,
+    ...(typeof input?.conversation_id === 'string' ? { conversation_id: input.conversation_id } : {}),
+    ...(extractToolPermissions(leading) ? { current_step_tools: extractToolPermissions(leading) } : {}),
+    ...(extractCurrentStepSkill(leading) ? { current_step_skill: extractCurrentStepSkill(leading) } : {}),
+  };
 }
 
 /**
@@ -352,12 +421,19 @@ async function main() {
   // Scoped to the response-driven branches below — the start_workflow preflight
   // branch still needs to run for a failed start, which is exactly when the
   // observer should stay suppressed for the turn.
-  const toolFailed = !!(toolResponse?.isError || event.error ||
+  const toolFailed = !!(toolResponse?.isError || event.error || /^(?:Error:|Failed to )/.test(responseText(toolResponse).trim()) ||
     (typeof toolResponse === 'object' && toolResponse.error));
 
   // The one shape every branch below agrees on. A malformed top-level input is
   // not a call we can reason about.
   const call = stateCall(event.tool_input || {});
+
+  if (WORKFLOW_RECOVERY_PATTERN.test(toolName)) {
+    if (toolFailed || !call) return;
+    const updates = recoveryUpdates({ ...event, tool_input: call });
+    if (updates) sessionState.write(updates, { onlyIfRecoveryRequired: true });
+    return;
+  }
 
   // Track local skill invocations via the Skill tool (Claude Code).
   // The PostToolUse hook fires for ALL tool calls — including the built-in
@@ -410,6 +486,7 @@ async function main() {
   // reminders on the next turn.
   if (isAbandon && isWorkflowAbandoned(toolResponse)) {
     sessionState.write({
+      ...(/^\*\*Workflow abandoned\*\*/.test(responseText(toolResponse).trim()) ? { state_recovery_required: false } : {}),
       // Codex: the turn-cadence baseline moves with the time baseline below.
       last_checkpoint_turn: sessionState.read().turn_count || 0,
       active_workflow: false,
@@ -453,6 +530,21 @@ async function main() {
       // the lower bound of the active-time window it stamps onto duration_ms.
       step_active_since: new Date().toISOString(),
     };
+    // Starting a verified workflow repairs a synthetic corruption hold. A
+    // real existing checkpoint stays pinned unless the start itself replaces
+    // it with an authoritative checkpoint.
+    if (conversationId) {
+      const state = sessionState.read();
+      const pendingStep = extractPendingCheckpointStep(toolResponse);
+      updates.state_recovery_required = false;
+      if (state.state_recovery_required || pendingStep) Object.assign(updates, {
+        pending_checkpoint: Boolean(pendingStep),
+        pending_checkpoint_step: pendingStep,
+        pending_checkpoint_at: pendingStep ? new Date().toISOString() : null,
+        pending_checkpoint_question_id: null,
+        pending_checkpoint_response_field: null,
+      });
+    }
     // Pin the observe_session conversation id separately so the periodic
     // Stop-hook checkpoint can target it after the workflow completes —
     // conversation_id above is nulled on completion. Captured here (not
@@ -609,9 +701,11 @@ async function main() {
     // The pin clears on **RE-ENTRY** (the user's answer flowed back), or
     // implicitly on workflow completion / abandonment below.
     const pendingStep = extractPendingCheckpointStep(toolResponse);
+    const lifecycleUpdates = lifecycleRecoveryUpdates(event);
     if (pendingStep) {
       const metadata = extractPendingCheckpointMetadata(toolResponse);
       sessionState.write({
+        ...lifecycleUpdates,
         pending_checkpoint: true,
         pending_checkpoint_step: pendingStep,
         pending_checkpoint_at: new Date().toISOString(),
@@ -620,6 +714,7 @@ async function main() {
       });
     } else if (isRelayedQuestionReentry(toolResponse)) {
       sessionState.write({
+        ...lifecycleUpdates,
         pending_checkpoint: false,
         pending_checkpoint_step: null,
         pending_checkpoint_at: null,
@@ -652,6 +747,7 @@ async function main() {
       const state = sessionState.read();
       const advanceUpdates = {};
       if (state.pending_checkpoint && isNextStepAdvance) {
+        Object.assign(advanceUpdates, lifecycleUpdates);
         advanceUpdates.pending_checkpoint = false;
         advanceUpdates.pending_checkpoint_step = null;
         advanceUpdates.pending_checkpoint_at = null;
@@ -688,6 +784,7 @@ async function main() {
   // PDLC phrases) because it checks active_workflow, not observer_blocked.
   if (isStateUpdate && isWorkflowComplete(toolResponse)) {
     sessionState.write({
+      ...lifecycleRecoveryUpdates(event),
       // Codex: the turn-cadence baseline moves with the time baseline below.
       last_checkpoint_turn: sessionState.read().turn_count || 0,
       active_workflow: false,

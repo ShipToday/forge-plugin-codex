@@ -4,7 +4,7 @@
 // or infer that a mentioned tool ran: require a single literal tools.<name>()
 // call AND a recognizable Forge result. Multi-call/dynamic scripts need host
 // per-call receipts to associate inputs with results safely.
-const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow)$/;
+const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow|get_workflow_state)$/;
 
 function responseText(value, depth = 0) {
   if (!value || depth > 8) return '';
@@ -15,6 +15,18 @@ function responseText(value, depth = 0) {
   if (Array.isArray(value.content)) return responseText(value.content, depth + 1);
   if (typeof value.text === 'string') return responseText(value.text, depth + 1);
   return JSON.stringify(value);
+}
+
+function responseHasError(value, depth = 0) {
+  if (!value || depth > 8) return false;
+  if (typeof value === 'string') {
+    try { return responseHasError(JSON.parse(value), depth + 1); } catch { return false; }
+  }
+  if (Array.isArray(value)) return value.some((entry) => responseHasError(entry, depth + 1));
+  if (typeof value !== 'object') return false;
+  return value.isError === true
+    || responseHasError(value.content, depth + 1)
+    || responseHasError(value.text, depth + 1);
 }
 
 function tokensFor(source) {
@@ -103,7 +115,7 @@ function normalizeToolEvent(event) {
     }
   }
   if (callIndex === -1 || !FORGE_TOOL.test(tokens[callIndex + 2])
-    || !isTopLevelAwait(tokens, callIndex) || event.tool_response?.isError) return null;
+    || !isTopLevelAwait(tokens, callIndex) || responseHasError(event.tool_response)) return null;
   const input = literalInput(tokens, callIndex + 4);
   if (!input) return null;
   const text = responseText(event.tool_response);

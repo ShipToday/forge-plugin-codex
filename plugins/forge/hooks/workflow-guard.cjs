@@ -503,6 +503,14 @@ function isAllowedByStepPermissions(bare, allowedCategories) {
 }
 
 function buildCheckpointDenyReason(state, toolName) {
+  if (state.state_recovery_required) {
+    return [
+      'Forge session state is unreadable; workflow permissions must be recovered before continuing.',
+      `Tool "${toolName}" cannot proceed while the local workflow state is unknown.`,
+      'Call forge__get_workflow_state with the current conversation_id to restore the canonical workflow state (request the complete response, without instruction chunks).',
+      'This recovery read does not submit a question or record an answer. Follow the recovered workflow state; a real pending checkpoint remains pinned.',
+    ].join('\n');
+  }
   const responseField = state.pending_checkpoint_response_field || 'gate_answer';
   const lines = [
     `Forge workflow is at a CHECKPOINT awaiting user input (skill="${state.pending_checkpoint_step || 'unknown'}").`,
