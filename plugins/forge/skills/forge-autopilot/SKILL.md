@@ -98,6 +98,20 @@ chaining; those examples omit conditional fields for readability.
 
 ## Step 2: Route the request
 
+### Codex question lifetime
+
+For Forge decisions, approvals, and routing questions on Codex, do not use
+`request_user_input_async`: its picker can close when the turn ends or the UI
+times out, even after `accepted:true`. Prefer blocking `request_user_input`
+only when callable and permitted in the current mode. If only the async tool
+is available, show persistent numbered choices and ask for a numbered reply.
+Do not force Plan mode or keep a picker alive with sleeps or polling. If an
+async question was already submitted, show the same choices and reply
+instructions before ending the turn; do not submit a second picker or claim
+the first remains visible. Record any required submitted receipt without an
+answer, and wait for the actual reply. This restriction is Codex-only:
+Claude Code continues to use `AskUserQuestion` and its existing wait protocol.
+
 ### Continuation boundary — check before calling Forge
 
 Use the full conversation, not only the user's latest sentence, to decide
