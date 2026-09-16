@@ -98,6 +98,20 @@ chaining; those examples omit conditional fields for readability.
 
 ## Step 2: Route the request
 
+### Codex question lifetime
+
+For Forge decisions, approvals, and routing questions on Codex, do not use
+`request_user_input_async`: its picker can close when the turn ends or the UI
+times out, even after `accepted:true`. Prefer blocking `request_user_input`
+only when callable and permitted in the current mode. If only the async tool
+is available, show persistent numbered choices and ask for a numbered reply.
+Do not force Plan mode or keep a picker alive with sleeps or polling. If an
+async question was already submitted, show the same choices and reply
+instructions before ending the turn; do not submit a second picker or claim
+the first remains visible. Record any required submitted receipt without an
+answer, and wait for the actual reply. This restriction is Codex-only:
+Claude Code continues to use `AskUserQuestion` and its existing wait protocol.
+
 ### Continuation boundary — check before calling Forge
 
 Use the full conversation, not only the user's latest sentence, to decide
@@ -327,7 +341,7 @@ After calling `start_workflow`, Forge returns step-by-step instructions.
 Follow them:
 
 1. Execute each step as instructed
-2. Follow the returned question-delivery instructions. Forge may deliver a native MCP form and return the answered step directly; do not ask the same question again after RE-ENTRY. Otherwise use only a question tool available and permitted by this host. Use `request_user_input` only when it is actually callable in the current mode; do not assume `request_user_input_async` exists and do not ask permission to use the native UI. If no compatible native tool is callable, render bounded choices as a numbered list (`1.`, `2.`, `3.`...) and tell the user to enter one number; for multi-select, ask for comma-separated numbers. Keep genuinely open-ended prompts as free text.
+2. Follow the returned question-delivery instructions. Forge may deliver a native MCP form and return the answered step directly; do not ask the same question again after RE-ENTRY. Otherwise use only a question tool available and permitted by this host. Use blocking `request_user_input` only when it is actually callable in the current mode; never use `request_user_input_async` for Forge decisions (see Codex question lifetime), and do not ask permission to use the native UI. If no compatible native tool is callable, render bounded choices as a numbered list (`1.`, `2.`, `3.`...) and tell the user to enter one number; for multi-select, ask for comma-separated numbers. Keep genuinely open-ended prompts as free text.
 3. A tool submission acknowledgment means submitted, not displayed or answered. Wait for the actual user answer before dependent work. Preserve the question ID, step token, option order and labels. Post the actual answer through the returned `user_answer` or `gate_answer` path. Never convert dismissal, failure, empty input, an invalid/out-of-range number, or a preselected default into `TBD` or approval. Keep the decision identifiable to the user. Read-only recovery does not re-present; use `question_resume: true` with the returned identity on an explicit resume.
 4. After completing each step, call `forge__update_state` with the results
    AND the `step_token` from the most recent response (see below)
@@ -364,7 +378,7 @@ is not in the list. Categories are coarse:
 | Category | Tools |
 |----------|-------|
 | `read_code` | filesystem reads and search (always allowed regardless) |
-| `ask_user` | direct user question or structured user-input tool |
+| `ask_user` | direct user question or blocking `request_user_input` |
 | `web` | web fetch and web search tools |
 | `tracker_read` | `list_issues`, `get_issue`, `list_comments`, `search_threads`, … |
 | `tracker_write` | `save_issue`, `create_issue`, `save_comment`, `update_issue`, … |

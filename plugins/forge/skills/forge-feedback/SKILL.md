@@ -73,9 +73,10 @@ Session context (sanitized):
 
 ## Step 4 — Let the user revise, then confirm
 
-Ask the user to confirm, revise, or cancel. Use the host's question UI
-(a structured user-input tool if available) with options like **Send it**, **Edit first**,
-and **Don't send**:
+Ask the user to confirm, revise, or cancel. Use blocking `request_user_input`
+when it is callable; never use `request_user_input_async`, whose picker can close
+before the user answers. Otherwise show the options as a numbered list and wait
+for the reply. Offer options like **Send it**, **Edit first**, and **Don't send**:
 
 - **Edit first** → apply their changes and re-render the payload (back to Step 3).
 - **Don't send** / cancel / no response → **send nothing**, do not call
