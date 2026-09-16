@@ -449,15 +449,21 @@ function forSession(sessionId) {
         }
         return true;
       }
+      const pid = Number(match[1]);
+      let alive = true;
       try {
-        process.kill(Number(match[1]), 0);
+        process.kill(pid, 0);
+      } catch (error) {
+        // EPERM means the PID exists under another user, possibly after reuse.
+        if (error.code === 'ESRCH') alive = false;
+        else if (error.code !== 'EPERM') return false;
+      }
+      if (alive) {
         const recorded = record?.birth;
         if (typeof recorded !== 'string' || !recorded) return false;
-        if (!identities.has(entries[0])) identities.set(entries[0], processIdentity(Number(match[1])));
+        if (!identities.has(entries[0])) identities.set(entries[0], processIdentity(pid));
         const current = identities.get(entries[0]);
         if (!current || current === recorded) return false;
-      } catch (error) {
-        if (error.code !== 'ESRCH') return false;
       }
       // Only the reaper that removed this unique marker may remove the empty
       // directory. A successor's marker makes rmdir fail harmlessly.
