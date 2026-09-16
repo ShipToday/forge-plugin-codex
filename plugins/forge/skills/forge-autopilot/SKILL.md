@@ -378,7 +378,7 @@ is not in the list. Categories are coarse:
 | Category | Tools |
 |----------|-------|
 | `read_code` | filesystem reads and search (always allowed regardless) |
-| `ask_user` | direct user question or structured user-input tool |
+| `ask_user` | direct user question or blocking `request_user_input` |
 | `web` | web fetch and web search tools |
 | `tracker_read` | `list_issues`, `get_issue`, `list_comments`, `search_threads`, … |
 | `tracker_write` | `save_issue`, `create_issue`, `save_comment`, `update_issue`, … |

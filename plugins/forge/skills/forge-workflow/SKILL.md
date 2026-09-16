@@ -239,9 +239,10 @@ exists. The admin's intent is ambiguous:
   system if no org preset — for a team override).
 
 Ask the admin to choose between "Modify existing" and "Replace from
-scratch". If a structured user-input tool is available, use it as the
-only tool call in that response; otherwise ask the choice directly and
-wait for the answer.
+scratch". If blocking `request_user_input` is callable, use it as the
+only tool call in that response; never use `request_user_input_async`,
+whose picker can close before the admin answers. Otherwise list the
+choices as numbered text and wait for the answer.
 
 Handle the answer:
 
@@ -608,9 +609,11 @@ mean to keep.
 Show the final structured plan — workflow fields, ordered `steps`
 (with `skill_id` and resolved `applicable_expression`),
 `example_invocation`, and any `new_skills` being created. Then ask the
-admin to choose "Save", "Keep editing", or "Cancel". If a structured
-user-input tool is available, use it as the only tool call in that
-response; otherwise ask the choice directly and wait for the answer.
+admin to choose "Save", "Keep editing", or "Cancel". If blocking
+`request_user_input` is callable, use it as the only tool call in that
+response; never use `request_user_input_async`, whose picker can close
+before the admin answers. Otherwise list the choices as numbered text and
+wait for the answer.
 
 Handle the answer:
 
@@ -831,9 +834,11 @@ If the target is team-scoped AND the org has no preset of its own (no
 wording instead — the team falls through to the system default and the
 workflow stops running for that team.
 
-Ask the admin to choose "Remove override" or "Cancel". If a structured
-user-input tool is available, use it as the only tool call in that
-response; otherwise ask the choice directly and wait for the answer.
+Ask the admin to choose "Remove override" or "Cancel". If blocking
+`request_user_input` is callable, use it as the only tool call in that
+response; never use `request_user_input_async`, whose picker can close
+before the admin answers. Otherwise list the choices as numbered text and
+wait for the answer.
 
 Handle the answer:
 
