@@ -7,7 +7,7 @@
  * passive-observation.cjs. Linked sessions still receive their passive
  * context. Stop schedules observation/checkpoints locally.
  *
- * SHI-987: Forge starts only when the user asks for it by name, and whether
+ * Forge starts only when the user asks for it by name, and whether
  * they did is the model's judgment — made against the rule in the
  * forge-autopilot skill and the server's instructions. This hook reads nothing
  * in the message to decide it: no Forge name, no SDLC vocabulary, no work item
@@ -85,7 +85,7 @@ async function main() {
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
 
-  // SHI-966 approval authenticity: a prompt arriving while a question is
+  // Approval authenticity: a prompt arriving while a question is
   // pinned is the user's turn on it — a numbered reply, or a plain answer
   // where no native question tool exists. workflow-guard accepts an answer
   // posted after this stamp; without it (or a question-tool call) the model
@@ -96,7 +96,7 @@ async function main() {
     state.pending_checkpoint_user_turn_at = at;
   }
 
-  // Step 0 (SHI-906): seed the git baseline BEFORE this turn's work happens.
+  // Step 0: seed the git baseline BEFORE this turn's work happens.
   // stop-observer.cjs detects a commit by comparing HEAD against this value
   // after the turn. Seeded there — at the first Stop — a commit made during
   // turn 1 became the baseline itself and was never a milestone, which is

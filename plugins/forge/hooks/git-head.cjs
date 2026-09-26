@@ -2,7 +2,7 @@
  * git-head.cjs — resolve the current HEAD sha without spawning git.
  *
  * Shared by two hooks that between them implement the git-milestone route to
- * observer eligibility (SHI-906 AC2):
+ * observer eligibility:
  *
  *   - prompt-router.cjs (UserPromptSubmit) SEEDS `git_head_baseline` on the
  *     session's first prompt, BEFORE any work has happened.

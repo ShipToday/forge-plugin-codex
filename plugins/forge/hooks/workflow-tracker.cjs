@@ -41,7 +41,7 @@ const WORKFLOW_STATE_PATTERN = 'forge__update_state';
 const WORKFLOW_ABANDON_PATTERN = 'forge__abandon_workflow';
 const WORKFLOW_STATE_READ_PATTERN = 'forge__get_workflow_state';
 // The host question tools whose PostToolUse proves a pinned question reached
-// the user (SHI-966): Claude Code's AskUserQuestion, Codex's request_user_input.
+// the user: Claude Code's AskUserQuestion, Codex's request_user_input.
 const QUESTION_TOOL_RE = /(?:^|__|\.)(?:AskUserQuestion|request_user_input(?:_async)?)$/;
 
 // -- Helpers ------------------------------------------------------------------
@@ -67,7 +67,7 @@ const QUESTION_TOOL_RE = /(?:^|__|\.)(?:AskUserQuestion|request_user_input(?:_as
  * confines it to the host's own tool-results directory, whose location and
  * hook-payload shape are not verified. A replaced reply is instead handled by
  * the server keeping replies under REPLY_BUDGET_BYTES and by the
- * get_workflow_state re-sync below (SHI-973).
+ * get_workflow_state re-sync below.
  */
 function responseText(response) {
   if (!response) return '';
@@ -114,8 +114,8 @@ function isWorkflowAbandoned(response) {
  * Two variants share this marker:
  *   - Relayed-question CHECKPOINT (`"<step>" awaiting user input`): the
  *     skill emitted needs_input and is waiting for the AI to relay it.
- *   - Legacy post-step confirmation-gate CHECKPOINT, from servers before
- *     SHI-964 removed the gate (`"<step>" paused at confirmation gate`):
+ *   - Legacy post-step confirmation-gate CHECKPOINT, from older servers
+ *     that still had the gate (`"<step>" paused at confirmation gate`):
  *     kept so this plugin still pins against an older server. The orchestrator paused
  *     after the step completed, waiting for the user to confirm advance.
  *
@@ -136,7 +136,7 @@ function extractPendingCheckpointStep(response) {
   return match ? match[1] : null;
 }
 
-// Server question ids are `q_<uuid>` (src/policies/question-contract.js).
+// Server question ids are `q_<uuid>`.
 const QUESTION_ID = 'q_[A-Za-z0-9-]{1,80}';
 const POSTBACK_RE = new RegExp(`"question_id":"(${QUESTION_ID})","step_token":"[^"\\n]{0,200}","(gate_answer|user_answer)":`, 'g');
 const BOLD_QUESTION_RE = new RegExp(`\\*\\*Question ID\\*\\*:\\s*\`?(${QUESTION_ID})\`?`, 'gi');
@@ -151,7 +151,7 @@ function lastMatch(text, re) {
 
 function extractPendingCheckpointMetadata(response) {
   const text = responseText(response);
-  // SHI-973: the server's own answer line is the reliable source. Every
+  // The server's own answer line is the reliable source. Every
   // question CHECKPOINT ends with `state_updates: {"question_id":…,
   // "step_token":…,"<field>":…}`, while the bold `**Question ID**` /
   // `**Response Field**` pair only appears on the PR-revision path. Reading
@@ -171,7 +171,7 @@ function extractPendingCheckpointMetadata(response) {
 }
 
 /**
- * Re-sync the CHECKPOINT pin from a forge__get_workflow_state reply (SHI-973).
+ * Re-sync the CHECKPOINT pin from a forge__get_workflow_state reply.
  *
  * The pin is otherwise released only when an update_state reply carries a
  * RE-ENTRY / NEXT STEP marker. When the host replaced that reply (an oversized
@@ -185,13 +185,13 @@ function extractPendingCheckpointMetadata(response) {
  * released is released. Anything else — an error, another conversation —
  * changes nothing, so state can only be released by a positive server signal.
  */
-// A recovery snapshot of a run that is over (src/tools/get-workflow-state.js).
+// The status line of a recovery snapshot for a run that is over.
 const RUN_ENDED_LINE = /^\*\*RUN ENDED\*\*\s+—/;
 
 // get_workflow_state names the step by its composite id (`skill__N`); the rest
 // of the plugin keeps the bare skill id that update_state's headers carry, and
-// stop-observer replays it as `completed_step`. Mirrors decomposeStepId in
-// src/orchestrator.js.
+// stop-observer replays it as `completed_step`. Mirrors how the
+// server splits a composite id.
 function bareStepId(stepId) {
   const index = stepId.lastIndexOf('__');
   return index === -1 ? stepId : stepId.slice(0, index);
@@ -249,7 +249,7 @@ function resyncFromStateRead(sessionState, toolResponse) {
     // A recovery that re-serves the question already pinned keeps the pin time
     // and its evidence; one that reveals a different question (or the first
     // sight of one after a lost reply) starts over, so the answer needs a
-    // fresh ask (SHI-966).
+    // fresh ask.
     const sameQuestion = state.pending_checkpoint === true
       && (!metadata.questionId || !state.pending_checkpoint_question_id || metadata.questionId === state.pending_checkpoint_question_id);
     sessionState.write({
@@ -290,23 +290,21 @@ function resyncFromStateRead(sessionState, toolResponse) {
 
 // -- update_state reply header ------------------------------------------------
 
-// The lines an update_state reply's header is made of (src/tools/update-state.js).
+// The lines an update_state reply's header is made of.
 const STEP_STATUS_LINE = /^Step "[^"]+" completed\. \((\d+)\/(\d+)\)\s*$/;
 // A standalone skill's completion line, as servers once led with it.
 const SKILL_STATUS_LINE = /^Skill \*\*\w+\*\* completed\.\s*$/;
 const MARKER_LINE = /^\*\*(?:(NEXT STEP)\*\*:\s*|(CHECKPOINT|RE-ENTRY)\*\*\s+—\s+)"([^"]+)"/;
 // `Write Lock` belongs here with the rest: the server renders it between Tool
-// Permissions and Step Token (src/tools/update-state.js), so leaving it out
+// Permissions and Step Token, so leaving it out
 // ended the header at that line — the lock went unread and the Step Token
 // after it fell into the body.
 const METADATA_LINE = /^\*\*(?:Idempotent Retry|Model Routing|Tool Permissions|Write Lock|Step Token|Question ID|Response Field)\*\*:/;
 const DISPLAY_BLOCK_OPEN = /^(?:> \*\*Relay to the user\*\*|<<<FORGE_DISPLAY_VERBATIM\b)/;
 const DISPLAY_BLOCK_CLOSE = '<<<END FORGE_DISPLAY_VERBATIM>>>';
-// The line renderCompletedStepFindings (src/policies/step-findings.js) puts
-// above a finished step's `## Findings` block.
+// The caption the server puts above a finished step's `## Findings` block.
 const FINDINGS_CAPTION = /^_What \*\*.*\*\* found — .*_\s*$/;
-// The step envelope's opening sentinel (buildEnvelope in
-// src/capabilities/protocols/model-routing.js). Everything after it is the step
+// The step envelope's opening sentinel. Everything after it is the step
 // body, which is free text.
 const ENVELOPE_OPEN = /^<<<FORGE_NEXT_STEP\b/;
 
@@ -322,8 +320,8 @@ function startsHeader(line) {
 }
 
 /**
- * Skip the must-display blocks that start at `start`, as wrapDisplayVerbatim
- * renders them (src/capabilities/protocols/run-contract.js): an optional
+ * Skip the must-display blocks that start at `start`, as the server
+ * renders them: an optional
  * `## Findings` heading, the `> **Relay to the user**` directive, the copy
  * between the FORGE_DISPLAY_VERBATIM sentinels and, for findings, a truncation
  * note and a `---` rule. With `caption`, a finished step's findings caption may
@@ -367,7 +365,7 @@ function skipLeadingDisplayBlocks(lines) {
  * Where an older server's advance resumes its header after the finished
  * step's findings, or -1 when `index` does not start such a region.
  *
- * Servers from SHI-964 until the contract audit rendered a finished step's
+ * Some older servers rendered a finished step's
  * findings BETWEEN the status line and `**NEXT STEP**`. Reading stopped at
  * the findings caption, so the marker was never seen: the next step's tool
  * permissions, write lock and active-time boundary went unrecorded, and an
@@ -414,7 +412,7 @@ function findingsRegionEnd(lines, index, status) {
  * Read the header a forge__update_state reply leads with. Every pin, release,
  * advance and completion decision is made from it, never from the body.
  *
- * src/tools/update-state.js renders each reply as a header, then a body:
+ * The server renders each reply as a header, then a body:
  *
  *   advance     Step "<done>" completed. (n/m)
  *               (blank)
@@ -451,8 +449,8 @@ function findingsRegionEnd(lines, index, status) {
  * any must-display block the reply leads with: none does today, but that block
  * is copy for the user and can quote a header too.
  *
- * One exception to "the first other line starts the body": servers from
- * SHI-964 until the contract audit rendered an advance's findings (caption,
+ * One exception to "the first other line starts the body": some older
+ * servers rendered an advance's findings (caption,
  * `## Findings`, relay line, display block, `---`) between its status line and
  * its marker. Stopping there lost the marker, and with it the next step's tool
  * permissions and write lock. When only a status line has been read and the
@@ -585,7 +583,7 @@ function parseReplyHeader(response, { wrapped = false } = {}) {
     reentry: kind === 'RE-ENTRY' && /^\*\*RE-ENTRY\*\*\s+—\s+"[^"]+"\s+resumed with user answer/.test(marker.input),
     idempotentRetry: header.some((line) => line.startsWith('**Idempotent Retry**')),
     toolPermissions: extractToolPermissions(header.join('\n')),
-    // SHI-966: read from the header for the same reason the markers are —
+    // Read from the header for the same reason the markers are —
     // the write lock is authorization state, and a body that could name a
     // released lock would unlock the guard.
     writeLock: extractWriteLock(header.join('\n')),
@@ -657,7 +655,7 @@ function extractToolPermissions(response) {
 }
 
 /**
- * Extract the write lock the server publishes as one line (SHI-966):
+ * Extract the write lock the server publishes as one line:
  *
  *   **Write Lock**: on — "<step id>" is set to Always asks: …
  *   **Write Lock**: released — "<step id>" write plan approved (<id>)
@@ -722,7 +720,7 @@ const OUTCOME_TO_STATUS = {
   ad_hoc: 'logged',
   snoozed: 'snoozed',
   dismissed: 'dismissed',
-  // SHI-907: a SOFT decline. Distinct from `dismissed`, which stays
+  // A SOFT decline. Distinct from `dismissed`, which stays
   // terminal. Mapped to the `snoozed` status because both planes already
   // speak that vocabulary end to end — the re-fire branch in
   // stop-observer.cjs and the wake check in prompt-router.cjs both read it.
@@ -953,7 +951,7 @@ async function main() {
     return;
   }
 
-  // Recovery reads re-sync the CHECKPOINT pin and nothing else (SHI-973).
+  // Recovery reads re-sync the CHECKPOINT pin and nothing else.
   // Codex: a failed read said nothing, so it re-syncs nothing.
   if (toolName.includes(WORKFLOW_STATE_READ_PATTERN)) {
     if (toolFailed) return;
@@ -961,7 +959,7 @@ async function main() {
     return;
   }
 
-  // SHI-966 approval authenticity. A relayed question reaches the user
+  // Approval authenticity. A relayed question reaches the user
   // through the host's question tool; the guard refuses an answer posted with
   // no such call (and no user turn) after the pin. Record the call here, where
   // every PostToolUse arrives — only while pinned, because the timestamp is
@@ -1027,7 +1025,7 @@ async function main() {
       write_lock: null,
       current_step_skill: null,
       step_resync_required: false,
-      // R1 anti-double-count: the workflow span was already banked — per-step
+      // Anti-double-count: the workflow span was already banked — per-step
       // duration_ms stamps for the completed steps plus the __abandoned__ row
       // for the in-flight one. Advance the observer-checkpoint baseline past it
       // so a logged/linked session's next checkpoint measures post-abandon
@@ -1049,14 +1047,14 @@ async function main() {
       active_workflow: true,
       conversation_id: conversationId,
       current_skill: currentSkill,
-      // Per-step allowlist (V2 enforcement). null when the orchestrator did
+      // Per-step allowlist. null when the orchestrator did
       // not publish a Tool Permissions line — workflow-guard fails open.
       current_step_tools: toolPermissions,
       current_step_skill: currentStepSkill,
-      // SHI-966: the first step may already be locked (Always asks + writes).
+      // The first step may already be locked (Always asks + writes).
       write_lock: extractWriteLock(toolResponse),
       step_resync_required: false,
-      // R1 active-time: the first step begins now. workflow-guard reads this as
+      // Active time: the first step begins now. workflow-guard reads this as
       // the lower bound of the active-time window it stamps onto duration_ms.
       step_active_since: new Date().toISOString(),
     };
@@ -1172,7 +1170,7 @@ async function main() {
     if (observerEvent) {
       const { status: observerStatus, outcome: observerOutcome, sdlcStage, wakeCondition, workItemKey } = observerEvent;
       const statusUpdates = {};
-      // SHI-907: a soft decline is DERIVED from the outcome here rather than
+      // A soft decline is DERIVED from the outcome here rather than
       // read from a field on final_session_state. That is not a stylistic
       // choice — `extractObserverEvent` reads only `status`, `wake_condition`
       // and `work_item_key` from final_session_state, so any other key the
@@ -1240,7 +1238,7 @@ async function main() {
       // The same question re-served — a retry, or an answer that bounced —
       // keeps its pin time and the evidence gathered since: the user was
       // already asked it. A different question starts over, so evidence for
-      // the last one can never vouch for this one (SHI-966).
+      // the last one can never vouch for this one.
       const sameQuestion = state.pending_checkpoint === true
         && typeof metadata.questionId === 'string'
         && metadata.questionId === state.pending_checkpoint_question_id;
@@ -1264,7 +1262,7 @@ async function main() {
       });
     } else if (!header.complete) {
       // Normal step advance ("NEXT STEP") — clear any stale pin AND advance the
-      // R1 active-time boundary so the next step's duration_ms is measured from
+      // active-time boundary so the next step's duration_ms is measured from
       // here. Workflow completion is handled by the dedicated branch below which
       // also clears the pin via active_workflow: false semantics.
       //
@@ -1272,8 +1270,8 @@ async function main() {
       // non-advancing response cannot move it. CHECKPOINT / RE-ENTRY are handled
       // in the branches above; an older server's confirmation-gate PAUSE renders a
       // CHECKPOINT (so it lands in the pendingStep branch and correctly does NOT
-      // advance the boundary) — mirroring the server resetting stepStartedAt
-      // only on a true advance. Gate-continue renders a fresh NEXT STEP, so the
+      // advance the boundary) — mirroring the server resetting its step start
+      // time only on a true advance. Gate-continue renders a fresh NEXT STEP, so the
       // boundary advances on confirm too.
       //
       // Idempotent-retry exclusion: a duplicate update_state for an already-
@@ -1317,7 +1315,7 @@ async function main() {
       sessionState.write({ step_resync_required: true });
     }
 
-    // Per-step tool-permission allowlist refresh (V2 enforcement). Each
+    // Per-step tool-permission allowlist refresh. Each
     // step transition publishes a fresh `**Tool Permissions**: …` line;
     // we mirror it into session state so workflow-guard can enforce the
     // correct allowlist for the active step. Cleared on workflow
@@ -1368,7 +1366,7 @@ async function main() {
       write_lock: null,
       current_step_skill: null,
       step_resync_required: false,
-      // R1 anti-double-count: the workflow span was already banked per-step
+      // Anti-double-count: the workflow span was already banked per-step
       // via the guard's duration_ms stamps. Advance the observer-checkpoint
       // baseline past it so a logged/linked session's next checkpoint measures
       // post-workflow activity only — without this, the first post-workflow

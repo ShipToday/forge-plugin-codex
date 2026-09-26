@@ -154,7 +154,7 @@ function freshState(sessionId) {
     turn_count: 0,
     nudge_shown: false,
     // null | "snoozed" | "dismissed" | "linked" | "logged".
-    // SHI-907: a soft decline ("not this one") is persisted AS "snoozed" so
+    // A soft decline ("not this one") is persisted AS "snoozed" so
     // the existing re-fire path picks it up unchanged; only the audit
     // `outcome` distinguishes it from an explicit snooze. "dismissed"
     // remains terminal and means "stop asking".
@@ -166,11 +166,11 @@ function freshState(sessionId) {
     // on every engineering-time checkpoint. null until the observer sets them.
     wake_condition: null,
     work_item_key: null,
-    // SHI-907: set when the user softly declines the observer offer. NOT
+    // Set when the user softly declines the observer offer. NOT
     // cleared by the snooze re-fire, so a returning offer can acknowledge
     // the earlier "no" instead of repeating itself verbatim (AC4).
     declined_once: false,
-    // SHI-906: HEAD sha (or ref name) seen when this session was first
+    // HEAD sha (or ref name) seen when this session was first
     // observed inside a repository. The git-milestone eligibility route in
     // stop-observer.cjs seeds it on first sight and advances it whenever a
     // milestone is consumed; null until then, and forever outside a repo.
@@ -214,7 +214,7 @@ function freshState(sessionId) {
     // do not publish it; callers must retain the conservative fallback.
     pending_checkpoint_question_id: null,
     pending_checkpoint_response_field: null,
-    // SHI-966 approval authenticity — evidence the pinned question reached a
+    // Approval authenticity — evidence the pinned question reached a
     // person: the host's question tool was called after the pin
     // (`pending_checkpoint_asked_at`, recorded by workflow-tracker), or a user
     // prompt arrived after it (`pending_checkpoint_user_turn_at`, recorded by
@@ -224,7 +224,7 @@ function freshState(sessionId) {
     // by the user. Both reset when a different question is pinned.
     pending_checkpoint_asked_at: null,
     pending_checkpoint_user_turn_at: null,
-    // Per-step tool-permission allowlist (V2 enforcement).
+    // Per-step tool-permission allowlist.
     //   - current_step_tools: array of category strings the orchestrator
     //     published in the latest **Tool Permissions** line, or null when
     //     unknown (workflow-guard fails open).
@@ -232,7 +232,7 @@ function freshState(sessionId) {
     //     deny messages so the model knows which step is gating.
     current_step_tools: null,
     current_step_skill: null,
-    // SHI-966 write lock: `{ state: 'on'|'released', step_id }` parsed from
+    // Write lock: `{ state: 'on'|'released', step_id }` parsed from
     // the server's `**Write Lock**` line, or null when no lock is known —
     // which is what an older server, or a step that writes nothing, leaves
     // here. workflow-guard treats null as unlocked, so a plugin ahead of its
@@ -246,9 +246,9 @@ function freshState(sessionId) {
     // locked step), so workflow-guard holds writes until
     // forge__get_workflow_state re-syncs.
     step_resync_required: false,
-    // ── R1 active-time: step_active_since ───────────────────────────────
+    // ── active time: step_active_since ──────────────────────────────────
     // ISO timestamp marking when the CURRENT workflow step began (the
-    // client-side analog of the server's `stepStartedAt`). Set by
+    // client-side analog of the server's step start time). Set by
     // workflow-tracker.cjs on workflow start and on every genuine NEXT STEP
     // advance; NOT advanced on relayed-question CHECKPOINT/RE-ENTRY (the step
     // does not advance there). workflow-guard.cjs reads it as the lower bound
@@ -257,12 +257,12 @@ function freshState(sessionId) {
     step_active_since: null,
     // ── observation gate contract: forge_observation_enabled ───────────
     // Per-Claude-Code-session cache of the org-admin's observation
-    // toggle (Clerk publicMetadata.forgeObservationEnabled, surfaced
-    // on the MCP side as context.org_settings.forgeObservationEnabled).
+    // toggle (an org setting the server reads and surfaces to the
+    // session_observer skill).
     // Three-valued semantics:
     //   - `null` (default) — cache miss. The stop-observer hook
     //     proceeds with the normal FORGE OBSERVATION directive; the
-    //     MCP-side session_observer skill will read Clerk on the
+    //     MCP-side session_observer skill will read the org setting on the
     //     first Stop in this session and the gated path will write
     //     `false` here if the admin has disabled observation.
     //   - `false` — admin has disabled observation for this org.

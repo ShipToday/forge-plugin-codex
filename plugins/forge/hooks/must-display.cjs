@@ -104,7 +104,6 @@
  * rendering the relayed block is the only channel that exists.
  *
  * @see plugin/hooks/session-state.cjs for state management
- * @see src/capabilities/protocols/run-contract.js for the emitting side
  */
 
 'use strict';
