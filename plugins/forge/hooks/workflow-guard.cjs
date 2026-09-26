@@ -485,7 +485,7 @@ function buildResyncDenyReason(state, toolName) {
     'Forge could not read which step the workflow moved to from its last reply, so the active step\'s write lock is unknown.',
     `Tool "${toolName}" can write, so it is held until the step is confirmed. Reading is unaffected.`,
     '',
-    `Call forge__get_workflow_state(conversation_id: "${conversationId}", instruction_chunk_bytes: 20000). Its reply names the active step and restores its write lock, and this hold lifts.`,
+    `Call forge__get_workflow_state(conversation_id: "${conversationId}", instruction_chunk_bytes: 20000). Its reply names the active step and restores its write lock — or reports that the run has ended — and this hold lifts.`,
     '',
     'Do NOT work around this by writing through a different tool.',
   ].join('\n');

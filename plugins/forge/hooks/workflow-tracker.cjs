@@ -29,7 +29,7 @@
 const sessionStateModule = require('./session-state.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { attempted } = require('./checkpoint-claim.cjs');
-const { normalizeToolEvent } = require('./tool-event.cjs');
+const { normalizeToolEvent, wrappedForgeCall } = require('./tool-event.cjs');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
 
@@ -180,9 +180,14 @@ function extractPendingCheckpointMetadata(response) {
  * always allows it, and its header is the server's own view of the run: a
  * CHECKPOINT header means a question or gate is still pending (keep or set the
  * pin), a NEXT STEP header means none is (release it and load the step's
- * tool permissions). Anything else — an error, another conversation — changes
- * nothing, so the pin can only be released by a positive server signal.
+ * tool permissions), and a RUN ENDED header means the run is over — completed,
+ * stopped or abandoned — so everything its lost final reply would have
+ * released is released. Anything else — an error, another conversation —
+ * changes nothing, so state can only be released by a positive server signal.
  */
+// A recovery snapshot of a run that is over (src/tools/get-workflow-state.js).
+const RUN_ENDED_LINE = /^\*\*RUN ENDED\*\*\s+—/;
+
 // get_workflow_state names the step by its composite id (`skill__N`); the rest
 // of the plugin keeps the bare skill id that update_state's headers carry, and
 // stop-observer replays it as `completed_step`. Mirrors decomposeStepId in
@@ -209,6 +214,34 @@ function resyncFromStateRead(sessionState, toolResponse) {
   const header = [];
   while (index < lines.length && lines[index].trim()) header.push(lines[index++]);
   const statusLine = header[0] || '';
+
+  // The run is over, and its final reply (or the stop or abandon reply) never
+  // arrived here: the recovery hold it left would otherwise wait forever on a
+  // step that no longer exists. Release the run exactly as the completion
+  // branch in main() would have.
+  if (RUN_ENDED_LINE.test(statusLine)) {
+    sessionState.write({
+      // Codex: the turn-cadence baseline moves with the time baseline below.
+      last_checkpoint_turn: state.turn_count || 0,
+      active_workflow: false,
+      observer_blocked: true,
+      conversation_id: null,
+      current_skill: null,
+      pending_checkpoint: false,
+      pending_checkpoint_step: null,
+      pending_checkpoint_at: null,
+      pending_checkpoint_question_id: null,
+      pending_checkpoint_response_field: null,
+      pending_checkpoint_asked_at: null,
+      pending_checkpoint_user_turn_at: null,
+      current_step_tools: null,
+      write_lock: null,
+      current_step_skill: null,
+      step_resync_required: false,
+      last_checkpoint_at: new Date().toISOString(),
+    });
+    return;
+  }
 
   const pendingStep = extractPendingCheckpointStep(statusLine);
   if (pendingStep) {
@@ -821,6 +854,26 @@ function extractSkillContext(call) {
   return call?.workflow || null;
 }
 
+/**
+ * A wrapped (Codex functions.exec) forge__update_state whose reply this hook
+ * cannot adopt — the call failed, or the host put a saved-result pointer in
+ * place of the reply. The server may still have moved the run, possibly into
+ * a locked step, and keeping the previous step's lock would fail open. So hold
+ * writes until forge__get_workflow_state names the step: the same hold a
+ * direct call gets in main() (step_resync_required).
+ *
+ * The call is only identified — a single literal, top-level awaited Forge
+ * call — and nothing is read from its reply, so this can only tighten state.
+ * Unlike a direct call, a refusal is not exempt: the reply text here is the
+ * script's output, and a refusal-shaped line in it proves nothing.
+ */
+function holdAfterUnreadWrappedUpdate(event) {
+  const name = wrappedForgeCall(event);
+  if (!name || !name.includes(WORKFLOW_STATE_PATTERN)) return;
+  const sessionState = sessionStateModule.forSession(event.session_id);
+  if (sessionState.read().active_workflow) sessionState.write({ step_resync_required: true });
+}
+
 // -- Main --------------------------------------------------------------------
 
 async function main() {
@@ -839,8 +892,14 @@ async function main() {
   }
 
   const rawToolName = event.tool_name;
+  const rawEvent = event;
   event = normalizeToolEvent(event);
-  if (!event) return; // Ambiguous wrapped calls cannot safely update session state.
+  if (!event) {
+    // Ambiguous wrapped calls cannot safely update session state — except to
+    // tighten it after a lost update_state (see holdAfterUnreadWrappedUpdate).
+    holdAfterUnreadWrappedUpdate(rawEvent);
+    return;
+  }
   // Codex functions.exec: the script's own output can precede the Forge reply.
   const wrapped = event.tool_name !== rawToolName;
 
