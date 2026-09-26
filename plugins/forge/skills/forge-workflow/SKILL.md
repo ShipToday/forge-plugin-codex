@@ -76,7 +76,8 @@ response shape:
                   "default_confirmation", "applicable_expression",
                   "complexity_class", "complexity_task_type",
                   "needs", "consumes", "produces",
-                  "required_capabilities", "skill_relevance_hint" }, ...],
+                  "required_capabilities", "skill_relevance_hint",
+                  "write_effect": { "writes", "categories", "targets", "self_gated" } }, ...],
   "workflows": [{ "id", "name", "description", "scope" }, ...],
   "caller":    {
     "orgRole", "orgId", "userId", "tier",
@@ -132,7 +133,7 @@ like:
 
 > Heads up on this run — you confirmed the estimate twice because a step
 > re-asked something you'd already answered. Teams that hit this often
-> loosen the confirmation gates on steps your team already trusts. Want me
+> set the steps your team already trusts to ask less. Want me
 > to set that up for your team? Say "customize my workflow" — I'll carry
 > over what just happened, so it should only take a question or two.
 
@@ -180,6 +181,43 @@ Classify the answer against two paths. Look for verbs and objects:
 If the intent is truly ambiguous ("change the bug workflow" — create
 a new one or modify/delete an existing one?), ask one clarifying
 question before routing. Do NOT assume.
+
+### Step 2c: Is authoring the right tool at all?
+
+Authoring is the heavyweight option, and it is easy to reach for when a
+lighter one would do the same job for free. Settle this BEFORE Step 3.
+
+A workflow you save here becomes your org's **own copy of the step
+list**. From then on that copy is what runs, and Forge's catalog no
+longer reaches it: a step added, removed or reordered in a later
+release, a changed gating condition, a revised default policy — none of
+it arrives. There is no re-sync and no drift warning; the only way back
+is to delete the override and lose the customization.
+
+That trade is worth it for a genuinely different process. It is a bad
+trade for a change the **dashboard's workflow drawer** already makes
+per step, which records a narrow override and leaves everything else
+inheriting normally:
+
+| What the admin wants | Right tool |
+|---|---|
+| Change how much a step asks (Never asks / AI decides / Always asks) | Drawer |
+| Turn one step off, or back on | Drawer |
+| Reset a workflow's policies to the recommendation for their AI maturity | Drawer |
+| Different steps, a different order, or steps that do not exist yet | **Author here** |
+| A process the catalog has no workflow for | **Author here** |
+
+If the intent is only the top three, say so plainly and point them at
+the drawer rather than authoring:
+
+> "That's a per-step setting — you can change it on the Workflows page
+> without making your own copy of <workflow name>, which keeps it
+> receiving Forge's updates. Want me to author a custom version anyway,
+> or would you rather change it there?"
+
+Ask; do not decide for them. An admin who wants their own copy is
+entitled to one — the point is that they should be choosing it, not
+arriving at it because authoring was the only path offered.
 
 ## Step 3: Match intent against the catalog you already fetched
 
@@ -260,6 +298,14 @@ If no override yet exists at the target scope (`scope` returned was a
 broader scope than the target), there is nothing to ask — the
 returned baseline is already the correct starting point and you
 proceed straight to Step 4.
+
+Note which way the update path runs in each case. An override that
+already exists at the target scope is ALREADY off the catalog's update
+path, so modifying or replacing it changes nothing about that — the
+trade was made when it was first authored. Creating the first override
+at a scope is what makes the trade. Step 2c is where that gets raised;
+do not re-litigate it here, and do not imply an existing override is
+still tracking the catalog.
 
 ## Step 4: Draft the proposal — schema-driven
 
@@ -436,14 +482,13 @@ output (a scan summary, dashboard, breakdown, findings table, etc.)
 before pausing for the user**? If yes, the instruction body MUST teach
 its executor to populate a `display_text` field. Two patterns:
 
-- **Pattern A — the skill ends a step at a `required` or `ai_judgment`
-  confirmation gate** (the post-step gate): the executor's normal
-  completion payload should include
+- **Pattern A — the skill completes with analysis the user should see**:
+  the executor's normal completion payload should include
   `display_text: "<the analytical markdown the executor just produced>"`.
-  The orchestrator strips it from persistent state and renders it as a
-  `## Findings` section above the gate CHECKPOINT body, so the parent
-  sees the findings even when a sub-agent only relays the gate
-  CHECKPOINT verbatim. Reference: `receive_epic_handoff` populates
+  The orchestrator strips it from persistent state and shows it as a
+  `## Findings` section above the next step (or the run recap), so the
+  parent sees the findings even when a sub-agent only relays the
+  response verbatim. Reference: `receive_epic_handoff` populates
   `display_text` with its Issue Context Brief.
 
 - **Pattern B — the skill is a relayed-question skill** (the executor
@@ -503,9 +548,9 @@ approval preview accurate.)
 ### Session Feedback must close every workflow
 
 Every workflow you author MUST end with a **`session_feedback`** step — the
-standard end-of-session recap (steps, artifacts, decisions, timing, and an
-optional anonymized feedback send) that every Forge system default workflow
-closes with. Keeping authored workflows consistent with that convention is
+standard end-of-session recap (steps, artifacts, decisions, timing, and —
+after a poor session — how to send feedback) that every Forge system default
+workflow closes with. Keeping authored workflows consistent with that convention is
 required, not optional. When you assemble the ordered step list:
 
 - If the admin's steps do **not** already end with `session_feedback`,
@@ -604,11 +649,63 @@ a whole class of misconfiguration — admins should never accidentally
 configure dormant steps because of an inherited expression they didn't
 mean to keep.
 
+## Step 7b: Confirm "Never asks" on a step that writes
+
+A step's `confirmation_policy` decides how much it asks: `auto` (Never
+asks) answers its own questions and makes its writes **without asking**,
+`ai_judgment` (AI decides) asks before any write that would normally need
+approval, and `required` (Always asks) asks every question and approves
+its writes against a plan first.
+
+For every step your proposal sets to `auto` — including one you kept from
+a baseline — look up its skill's `write_effect` in the catalog you fetched
+in Step 1 (`catalog.skills[].write_effect`). When `write_effect.writes` is
+`true`, do NOT save it silently. Ask once per such step, before the Step 8
+save question, naming what it writes from `write_effect.targets` (or "your
+connected tools" when the list is empty): "\"<Step name>\" is set to Never
+asks, so it will write to <targets> without asking anyone. Keep it that
+way?"
+
+Ask the admin to choose between "Switch to AI decides (Recommended)" — it
+asks before a write that would normally need approval — and "Keep Never
+asks" — it writes to <targets> without asking. If blocking
+`request_user_input` is callable, use it as the only tool call in that
+response; never use `request_user_input_async`, whose picker can close
+before the admin answers. Otherwise list the choices as numbered text and
+wait for the answer.
+
+- **Switch to AI decides** — set that step's `confirmation_policy` to
+  `ai_judgment` and include the change in the Step 8 plan.
+- **Keep Never asks** — keep `auto`, and say so in the Step 8 plan
+  ("<Step name> writes without asking — you confirmed this").
+- **Skip / empty answer** — treat as "Switch to AI decides". Never keep a
+  writing step on Never asks without an explicit answer.
+
+A step whose skill does not write (`write_effect.writes` is `false`) needs
+no confirmation. This is the same confirmation the dashboard asks for when
+an admin sets Never asks on a step that writes.
+
 ## Step 8: Explicit admin confirmation
 
 Show the final structured plan — workflow fields, ordered `steps`
 (with `skill_id` and resolved `applicable_expression`),
-`example_invocation`, and any `new_skills` being created. Then ask the
+`example_invocation`, and any `new_skills` being created.
+
+Then state the durable consequence, in your own words, before the
+question — the same care Step D3 takes over deletion, for the same
+reason. Saving is the moment this workflow leaves the catalog's update
+path, and it is the one effect the admin cannot discover afterwards:
+there is no drift indicator anywhere in the product, so a copy that has
+fallen behind looks identical to one that has not.
+
+> "Saving makes this your org's own copy of <workflow name>. It will run
+> exactly as configured here — but it stops receiving Forge's updates to
+> that workflow: steps added, removed or reordered in a later release,
+> changed gating, and revised default policies won't reach it. Nothing
+> flags that later, and the only way back is to delete the override,
+> which loses this configuration."
+
+Say it once, plainly, and do not repeat it after they answer. Then ask the
 admin to choose "Save", "Keep editing", or "Cancel". If blocking
 `request_user_input` is callable, use it as the only tool call in that
 response; never use `request_user_input_async`, whose picker can close

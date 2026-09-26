@@ -20,7 +20,7 @@
  * that session's file.
  *
  * State files live in {os.tmpdir()}/forge-observer/{key}.json and
- * auto-expire after 4 hours (matching Forge's server-side TTL).
+ * auto-expire after 12 hours (matching Forge's server-side TTL).
  *
  * This module is deterministic — no AI, no network calls.
  */
@@ -38,7 +38,7 @@ const STATE_DIR = path.join(os.tmpdir(), 'forge-observer');
 // Idle window, not a lifetime cap: state is reset once a session has gone this
 // long without a WRITE (see read()). A live session refreshes its own mtime, so
 // this only fires on genuine inactivity.
-const TTL_MS = 4 * 60 * 60 * 1000;       // 4 hours idle
+const TTL_MS = 12 * 60 * 60 * 1000;      // 12 hours idle
 const CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours — auto-clean stale files
 
 // -- Helpers -----------------------------------------------------------------
@@ -159,7 +159,13 @@ function freshState(sessionId) {
     // `outcome` distinguishes it from an explicit snooze. "dismissed"
     // remains terminal and means "stop asking".
     status: null,
+    // The user's own words for when a snoozed offer may return, and the work
+    // item a linked session tracks. workflow-tracker.cjs records both from the
+    // session_observer completion's `final_session_state`; prompt-router.cjs
+    // quotes the first in its wake check and stop-observer.cjs puts the second
+    // on every engineering-time checkpoint. null until the observer sets them.
     wake_condition: null,
+    work_item_key: null,
     // SHI-907: set when the user softly declines the observer offer. NOT
     // cleared by the snooze re-fire, so a returning offer can acknowledge
     // the earlier "no" instead of repeating itself verbatim (AC4).
@@ -169,7 +175,6 @@ function freshState(sessionId) {
     // stop-observer.cjs seeds it on first sight and advances it whenever a
     // milestone is consumed; null until then, and forever outside a repo.
     git_head_baseline: null,
-    routing_emitted: false,
     active_workflow: false,
     observer_blocked: false,
     // Codex-only passive queue/delivery state. Missing fields in older files
@@ -190,7 +195,7 @@ function freshState(sessionId) {
     // workflow completes (conversation_id above is nulled on completion).
     // The periodic Stop-hook checkpoint targets this so it works even
     // from a later process that never ran observe_session itself.
-    // Only cleared by the 4h session-state TTL reset.
+    // Only cleared by the 12h session-state TTL reset.
     last_observer_conversation_id: null,
     current_skill: null,     // Active skill_id or workflow type
     skill_invocations: [],   // Local skills invoked this session [{ name, at }]
@@ -209,6 +214,16 @@ function freshState(sessionId) {
     // do not publish it; callers must retain the conservative fallback.
     pending_checkpoint_question_id: null,
     pending_checkpoint_response_field: null,
+    // SHI-966 approval authenticity — evidence the pinned question reached a
+    // person: the host's question tool was called after the pin
+    // (`pending_checkpoint_asked_at`, recorded by workflow-tracker), or a user
+    // prompt arrived after it (`pending_checkpoint_user_turn_at`, recorded by
+    // prompt-router — the numbered-reply fallback). workflow-guard refuses an
+    // answer posted with neither: a relayed question is the user's to answer,
+    // and a write plan "approved" by the model would be recorded as approved
+    // by the user. Both reset when a different question is pinned.
+    pending_checkpoint_asked_at: null,
+    pending_checkpoint_user_turn_at: null,
     // Per-step tool-permission allowlist (V2 enforcement).
     //   - current_step_tools: array of category strings the orchestrator
     //     published in the latest **Tool Permissions** line, or null when
@@ -217,6 +232,20 @@ function freshState(sessionId) {
     //     deny messages so the model knows which step is gating.
     current_step_tools: null,
     current_step_skill: null,
+    // SHI-966 write lock: `{ state: 'on'|'released', step_id }` parsed from
+    // the server's `**Write Lock**` line, or null when no lock is known —
+    // which is what an older server, or a step that writes nothing, leaves
+    // here. workflow-guard treats null as unlocked, so a plugin ahead of its
+    // server never blocks writes on its own initiative.
+    write_lock: null,
+    // True when an update_state reply to an active run carried no header this
+    // plugin can trust — a saved-result pointer in place of an oversized
+    // reply, a malformed or ambiguous older-server reply, a transport failure
+    // — so the active step's permissions and write lock are unknown. Keeping
+    // the previous step's would fail open (its shell and no lock, into a
+    // locked step), so workflow-guard holds writes until
+    // forge__get_workflow_state re-syncs.
+    step_resync_required: false,
     // ── R1 active-time: step_active_since ───────────────────────────────
     // ISO timestamp marking when the CURRENT workflow step began (the
     // client-side analog of the server's `stepStartedAt`). Set by

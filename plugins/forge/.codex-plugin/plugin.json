@@ -1,6 +1,6 @@
 {
   "name": "forge",
-  "version": "1.24.0",
+  "version": "2.3.1",
   "description": "Forge by ShipToday brings free, AI-powered product development lifecycle automation into Codex.",
   "author": {
     "name": "ShipToday",
@@ -25,7 +25,7 @@
   "interface": {
     "displayName": "Forge",
     "shortDescription": "Route product work through Forge from Codex",
-    "longDescription": "Free, AI-powered product development lifecycle automation for Codex. Forge routes feature requests, bug reports, product planning, architecture exploration, reviews, and work-item follow-ups through structured ShipToday workflows backed by the hosted Forge MCP server.",
+    "longDescription": "Free, AI-powered product development lifecycle automation for Codex. Ask Forge by name and it routes feature requests, bug reports, product planning, architecture exploration, reviews, and work-item follow-ups through structured ShipToday workflows backed by the hosted Forge MCP server.",
     "developerName": "ShipToday",
     "category": "Productivity",
     "capabilities": [
@@ -35,9 +35,9 @@
     ],
     "websiteURL": "https://shiptoday.ai",
     "defaultPrompt": [
-      "Plan and scope the notifications feature",
-      "Fix the checkout page crash on mobile",
-      "Break down PROJ-123 into implementation stories"
+      "forge, plan and scope the notifications feature",
+      "forge, fix the checkout page crash on mobile",
+      "forge, break down PROJ-123 into implementation stories"
     ],
     "brandColor": "#111827",
     "composerIcon": "./assets/icon.png",

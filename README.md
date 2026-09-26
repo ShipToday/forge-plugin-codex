@@ -4,30 +4,40 @@ Free, AI-powered product development lifecycle automation for Codex.
 
 ## What it does
 
-Describe what you want to build, fix, plan, review, or ship. Forge routes the
-request through a structured PDLC workflow backed by the hosted Forge MCP
+Ask Forge by name — include `forge` or `@forge` in your message — and it routes
+the request through a structured PDLC workflow backed by the hosted Forge MCP
 server.
 
 Examples:
 
 ```text
-implement user authentication with OAuth
-fix the checkout page crash on mobile
-break down the notifications feature into stories
-estimate story points for PROJ-123
-check status of my feature
+forge, implement user authentication with OAuth
+@forge fix the checkout page crash on mobile
+forge, break down the notifications feature into stories
+forge, estimate story points for PROJ-123
+@forge check status of my feature
 ```
+
+Forge runs only when you ask for it. If your message only mentions Forge in
+passing, Codex asks whether you meant Forge before starting anything. A
+message that doesn't name Forge gets a normal response, even when it's about
+planning or shipping work or mentions a ticket like `PROJ-123`.
 
 ## What's included
 
 - **Forge MCP server** (`plugins/forge/.mcp.json`) connects to
   `https://teams.shiptoday.ai/mcp`.
-- **`forge-autopilot` skill** detects product-development intent and routes the
-  request to the right Forge workflow.
+- **`forge-autopilot` skill** routes your request to the right Forge workflow
+  when you ask Forge by name.
 - **`forge-workflow` skill** helps organization admins create or remove custom
   Forge workflow overrides.
-- **Hooks** (`plugins/forge/hooks/hooks.json`) coordinate session routing,
-  workflow state, step guardrails, and workflow tracking.
+- **`forge-feedback` skill** sends feedback to the ShipToday team from inside a
+  session. It shows you the exact message first and sends only after you
+  confirm.
+- **Hooks** (`plugins/forge/hooks/hooks.json`) coordinate session state and
+  workflow tracking, and hold tools while a question is waiting for you or a
+  write is waiting for your approval. They never read your message to decide
+  anything, make no network calls, and keep session state in local files.
 
 ## Install
 

@@ -2,9 +2,14 @@
 
 // Codex functions.exec exposes one outer hook event. Do not execute its source
 // or infer that a mentioned tool ran: require a single literal tools.<name>()
-// call AND a recognizable Forge result. Multi-call/dynamic scripts need host
-// per-call receipts to associate inputs with results safely.
-const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow)$/;
+// call AND a recognizable Forge result before adopting anything from it.
+// Multi-call/dynamic scripts need host per-call receipts to associate inputs
+// with results safely. A single literal call whose reply was lost or failed
+// can still be IDENTIFIED (wrappedForgeCall), so the tracker can hold writes
+// the way it does for a direct call — identification only ever tightens.
+// get_workflow_state is read-only, but its reply re-syncs the CHECKPOINT pin
+// (SHI-973), so a wrapped call has to reach the tracker too.
+const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow|get_workflow_state)$/;
 
 function responseText(value, depth = 0) {
   if (!value || depth > 8) return '';
@@ -90,8 +95,14 @@ function isTopLevelAwait(tokens, index) {
     && /^[A-Za-z_$][\w$]*$/.test(prefix[1]) && prefix[2] === '=' && prefix[3] === 'await');
 }
 
-function normalizeToolEvent(event) {
-  if (!['functions.exec', 'functions__exec'].includes(event.tool_name)) return event;
+const WRAPPERS = ['functions.exec', 'functions__exec'];
+// A reply the tracker may adopt names one of these. `**RUN ENDED**` is the
+// recovery snapshot of a run that is over.
+const FORGE_RESULT = /(?:\*\*(?:CHECKPOINT|RE-ENTRY|NEXT STEP|RUN ENDED|Workflow abandoned)\*\*|Conversation ID|Step "[^"]+" completed\.|Skill \*\*\w+\*\* completed\.)/;
+
+// The one literal, top-level awaited Forge call a wrapper script makes, or
+// null when there is not exactly one.
+function literalForgeCall(event) {
   const source = typeof event.tool_input === 'string' ? event.tool_input : event.tool_input?.code;
   if (typeof source !== 'string') return null;
   const tokens = tokensFor(source);
@@ -102,13 +113,30 @@ function normalizeToolEvent(event) {
       callIndex = i;
     }
   }
-  if (callIndex === -1 || !FORGE_TOOL.test(tokens[callIndex + 2])
-    || !isTopLevelAwait(tokens, callIndex) || event.tool_response?.isError) return null;
-  const input = literalInput(tokens, callIndex + 4);
-  if (!input) return null;
-  const text = responseText(event.tool_response);
-  if (!/(?:\*\*(?:CHECKPOINT|RE-ENTRY|NEXT STEP|Workflow abandoned)\*\*|Conversation ID|Step "[^"]+" completed\.|Skill \*\*\w+\*\* completed\.)/.test(text)) return null;
-  return { ...event, tool_name: tokens[callIndex + 2], tool_input: input, tool_response: text };
+  if (callIndex === -1 || !FORGE_TOOL.test(tokens[callIndex + 2]) || !isTopLevelAwait(tokens, callIndex)) return null;
+  return { tokens, callIndex, name: tokens[callIndex + 2] };
 }
 
-module.exports = { normalizeToolEvent, responseText };
+function normalizeToolEvent(event) {
+  if (!WRAPPERS.includes(event.tool_name)) return event;
+  const call = literalForgeCall(event);
+  if (!call || event.tool_response?.isError) return null;
+  const input = literalInput(call.tokens, call.callIndex + 4);
+  if (!input) return null;
+  const text = responseText(event.tool_response);
+  if (!FORGE_RESULT.test(text)) return null;
+  return { ...event, tool_name: call.name, tool_input: input, tool_response: text };
+}
+
+// Identify — never adopt — the Forge tool a wrapper script called, for a reply
+// normalizeToolEvent refused (a failure, a saved-result pointer). Returns the
+// tool name, or null when the event is not a wrapper or its script is not
+// exactly one literal top-level awaited Forge call. Nothing is read from the
+// reply: callers may only TIGHTEN state with it, never take a step from it.
+function wrappedForgeCall(event) {
+  if (!WRAPPERS.includes(event.tool_name)) return null;
+  const call = literalForgeCall(event);
+  return call ? call.name : null;
+}
+
+module.exports = { normalizeToolEvent, wrappedForgeCall, responseText };

@@ -285,9 +285,11 @@ function captureClaude(transcriptPath) {
 /**
  * Codex adapter (records-based core) — OpenAI rollout records. `token_count`
  * events are CUMULATIVE, so we take the LAST event rather than summing.
- * OpenAI reports `input` as the grand total INCLUDING cached input
- * (cached ⊆ input), so the un-cached input is `input - cached`.
- * No cache-creation concept → those stay 0.
+ * OpenAI reports `input` as the grand total INCLUDING cached input AND cache
+ * writes (both ⊆ input), so the un-cached input is `input - cached - writes`.
+ * Writes (`cache_write_input_tokens`, rollouts since openai/codex#33454,
+ * 2026-07) land in `cacheCreation5m`: OpenAI has one write rate and no TTL
+ * split, and the server price sheet carries that rate in both columns.
  *
  * @returns {object|null}
  */
@@ -302,15 +304,18 @@ function captureCodexFromRecords(records) {
   }
   if (!last) return null;
   // OpenAI reports `input_tokens` as the TOTAL prompt INCLUDING cached input
-  // (cached ⊆ input, unlike Claude's separate buckets). Store un-cached input
-  // only, or read-time weighting double-counts the cache-dominated bulk.
+  // and cache writes (both ⊆ input, unlike Claude's separate buckets). Store
+  // un-cached input only, or read-time weighting double-counts the
+  // cache-dominated bulk. Older rollouts carry no write field → 0.
   const totalInput = toInt(last.input_tokens);
   const cached = toInt(last.cached_input_tokens);
+  const writes = toInt(last.cache_write_input_tokens);
   const acc = freshAcc();
-  acc.input = Math.max(0, totalInput - cached);
+  acc.input = Math.max(0, totalInput - cached - writes);
   acc.cacheRead = cached;
+  acc.cacheCreation5m = writes;
   // reasoning_output ⊆ output_tokens, so output already includes it — no
-  // separate column needed. No cache-creation concept in OpenAI's model.
+  // separate column needed.
   acc.output = toInt(last.output_tokens);
   acc.modelName = modelName;
   const result = finalize(acc);
@@ -340,7 +345,8 @@ function captureCodex(rolloutPath) {
  * Pull the cumulative token usage out of a Codex rollout record. The validated
  * schema (2026-06-05) is `payload.type='token_count'` →
  * `payload.info.total_token_usage.{input_tokens, cached_input_tokens,
- * output_tokens, ...}`. Tolerant of a few simpler/nested shapes for forward/
+ * cache_write_input_tokens, output_tokens, ...}` (the write field arrived
+ * later and is absent on older rollouts). Tolerant of a few simpler/nested shapes for forward/
  * backward compat.
  */
 function extractCodexTokenCount(rec) {

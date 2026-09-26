@@ -2,13 +2,16 @@
 
 /**
  * Codex UserPromptSubmit routing. Required workflow continuation comes first.
- * Explicit work-item routing and queued passive developer context are then
- * delivered TOGETHER in one additionalContext payload, so a prompt that
- * mentions a work item can never starve a queued checkpoint or offer. Linked
- * sessions stay silent on key routing (as in the Claude Code plugin — the work
- * is already tracked) but still receive their passive context. Stop schedules
- * observation/checkpoints locally; a snoozed session gets a short per-prompt
- * wake check from passive-observation.cjs.
+ * Queued passive developer context is then delivered in one additionalContext
+ * payload, and a snoozed session gets a short per-prompt wake check from
+ * passive-observation.cjs. Linked sessions still receive their passive
+ * context. Stop schedules observation/checkpoints locally.
+ *
+ * SHI-987: Forge starts only when the user asks for it by name, and whether
+ * they did is the model's judgment — made against the rule in the
+ * forge-autopilot skill and the server's instructions. This hook reads nothing
+ * in the message to decide it: no Forge name, no SDLC vocabulary, no work item
+ * key. (A key used to earn an advisory routing hint; that is gone.)
  * Preserve this Codex adaptation during plugin synchronization.
  */
 
@@ -18,39 +21,7 @@ const sessionStateModule = require('./session-state.cjs');
 const { readHeadRef } = require('./git-head.cjs');
 const { deliver, additionalContext } = require('./passive-observation.cjs');
 
-// -- Detection patterns ------------------------------------------------------
-
-// Tracked work item key pattern (e.g. PROJ-123, BUG-42). Purely
-// structural — no vocabulary, no workflow knowledge. Matches any sequence
-// "<UPPERCASE letters>-<digits>" anywhere in the prompt.
-const EPIC_KEY_RE = /\b[A-Z][A-Z0-9]+-\d+\b/;
-
 // -- Directive builders ------------------------------------------------------
-
-function epicKeyRouting(key) {
-  // Advisory tone (was forced "MUST invoke"). The server now handles
-  // cited-reference disambiguation via `needsKeyConfirmation`,
-  // so the hook no longer needs to force the routing path. The hint
-  // remains because it's the structural signal that nudges Claude away
-  // from grabbing the work item directly via tracker MCP tools when
-  // Forge is the appropriate orchestrator — but final agency stays with
-  // Claude when the conversation context warrants a different choice.
-  return (
-    `FORGE ROUTING (advisory): The user's message references work item "${key}". ` +
-    `Consider invoking the "forge-autopilot" skill via the Skill tool — Forge orchestrates ` +
-    `the SDLC actions (planning, implementation, review, status) for tracked work items, ` +
-    `and routing through it keeps the audit trail intact. ` +
-    `If you fetch the ticket via Linear/Jira/etc. directly, prefer doing so as part of a ` +
-    `Forge workflow rather than ad-hoc; the workflow's first step typically does the fetch ` +
-    `and threads the result into the rest of the journey. ` +
-    `If your harness is in a planning/dry-run mode (e.g. Claude Code's plan mode), the same ` +
-    `recommendation applies: invoke forge-autopilot, fetch the workflow, execute its read-only ` +
-    `steps, and present any writes as part of the plan — defer those writes until plan mode exits. ` +
-    `Pass the user's full message as the input to the skill. ` +
-    `If the user's intent clearly does NOT match an SDLC workflow (e.g., they're asking what a ` +
-    `ticket reference means in a doc, not acting on it), use your judgment and skip Forge.`
-  );
-}
 
 function emitWorkflowContinuation(state) {
   const { conversation_id: conversationId, current_skill: currentSkill } = state;
@@ -80,11 +51,22 @@ function emitWorkflowContinuation(state) {
   process.stdout.write(parts.join(' '));
 }
 
+// A state write can throw: session-state gives up on a lock another hook holds
+// after LOCK_MAX_WAIT_MS, and refuses to overwrite a file it cannot parse. A
+// throw here used to reject main(), whose catch swallowed the directive this
+// turn was about to emit — a pending decision's continuation included. No
+// write here is worth that, so a failed one is dropped and routing goes on;
+// callers update the in-memory state themselves, so this turn still routes on
+// what it saw.
+function persist(sessionState, updates) {
+  try { sessionState.write(updates); } catch { /* keep routing */ }
+}
+
 // -- Main --------------------------------------------------------------------
 
 async function main() {
-  // Parse prompt from stdin
-  let prompt = '';
+  // Parse the event from stdin. Only its session and turn ids are used — the
+  // prompt text itself is never read (see the file header).
   let input = '';
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -94,15 +76,25 @@ async function main() {
     // A host may frame stdin with a UTF-8 byte-order mark and a trailing CRLF
     // (Cursor on Windows pipes it through PowerShell); trim() removes both.
     event = JSON.parse(input.trim());
-    prompt = event.prompt || event.message || event.content || '';
   } catch {
-    prompt = input.trim();
+    // Not JSON: no session id, so state falls back to the cwd key.
   }
 
   // Read session state — scoped to this Claude Code session so concurrent
   // sessions in the same directory each track their own workflow.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
+
+  // SHI-966 approval authenticity: a prompt arriving while a question is
+  // pinned is the user's turn on it — a numbered reply, or a plain answer
+  // where no native question tool exists. workflow-guard accepts an answer
+  // posted after this stamp; without it (or a question-tool call) the model
+  // is answering on the user's behalf, and the guard refuses.
+  if (state.active_workflow && state.pending_checkpoint) {
+    const at = new Date().toISOString();
+    persist(sessionState, { pending_checkpoint_user_turn_at: at });
+    state.pending_checkpoint_user_turn_at = at;
+  }
 
   // Step 0 (SHI-906): seed the git baseline BEFORE this turn's work happens.
   // stop-observer.cjs detects a commit by comparing HEAD against this value
@@ -116,7 +108,7 @@ async function main() {
   if (!state.git_head_baseline) {
     const head = readHeadRef(process.cwd());
     if (head) {
-      sessionState.write({ git_head_baseline: head });
+      persist(sessionState, { git_head_baseline: head });
       state.git_head_baseline = head;
     }
   }
@@ -143,7 +135,7 @@ async function main() {
     && state.observer_blocked
     && !state.observer_fired
   ) {
-    sessionState.write({ observer_blocked: false });
+    persist(sessionState, { observer_blocked: false });
     state.observer_blocked = false; // keep local copy in sync for downstream checks
   }
 
@@ -153,33 +145,16 @@ async function main() {
     return;
   }
 
-  const parts = [];
-
-  // Step 3: Epic key in prompt → advisory routing directive. This is the only
-  // content-based signal the hook acts on. It catches the case where Claude
-  // would otherwise bypass Forge in favor of fetching the work item directly
-  // via Linear/Jira/etc. A linked session is already tracked, so it gets no
-  // nudge (as in the Claude Code plugin) — its passive context still flows.
-  if (prompt && state.status !== 'linked') {
-    const keyMatch = prompt.match(EPIC_KEY_RE);
-    if (keyMatch) {
-      sessionState.write({ routing_emitted: true });
-      parts.push(epicKeyRouting(keyMatch[0]));
-    }
-  }
-
   // Codex localization: Stop only queues work. Deliver it once as developer
-  // context on a real prompt — alongside routing, never instead of it, so a
-  // work-item mention can't hold back a queued checkpoint whose time is
-  // already reserved. Its own try/catch: a failed state write must not take
-  // the routing hint down with it (that text is already built and correct).
+  // context on a real prompt (the snoozed-session wake check travels the same
+  // way). Its own try/catch: a failed state write must not take this hook
+  // down.
   let passive = '';
   try { passive = deliver(sessionState, state, event); } catch { passive = ''; }
-  if (passive) parts.push(passive);
 
-  // Step 5: No state worth acting on → silent. The LLM reads the
-  // forge-autopilot SKILL.md description and decides whether to invoke it.
-  if (parts.length) process.stdout.write(additionalContext(parts.join('\n\n')));
+  // Otherwise silent. The model answers, and starts Forge only if the user
+  // asked for it (the forge-autopilot skill's trigger rule).
+  if (passive) process.stdout.write(additionalContext(passive));
 }
 
 main().catch(() => {

@@ -11,22 +11,27 @@
  *      `pending_checkpoint: true`, only AskUserQuestion / forge__update_state
  *      / forge__abandon_workflow / read-only inspection may proceed.
  *
- *   2. Per-step tool_permissions enforcement (V2, this PR): when a workflow
- *      is active but no checkpoint is pending, the orchestrator publishes a
- *      `**Tool Permissions**: cat1, cat2, …` line on every step transition.
- *      The workflow-tracker hook mirrors that into `current_step_tools`.
- *      We deny tools whose category is not in the allowlist for the active
- *      step. Universal tools (Forge orchestration, Read/Grep/Glob,
- *      AskUserQuestion, TodoWrite, web inspection) are always allowed
- *      regardless of step.
+ *   2. The write lock (SHI-966): while an Always-asks step's write plan is
+ *      unapproved, tools on the write list are held. The server decides the
+ *      lock; the workflow-tracker hook records it.
+ *
+ * A step's `**Tool Permissions**` are NOT enforced here. They are the step's
+ * declared scope, which the model follows from its instructions — the same
+ * way it follows them for shell. Enforcing them meant keeping a map from every
+ * connector's tool names to categories beside the server's declarations, and
+ * each gap in that map refused work a step was told to do.
  *
  * Defensive defaults:
  *   - If no workflow is active, allow.
- *   - If `current_step_tools` is null (e.g., older orchestrator that does
- *     not publish the line), fail open — only CHECKPOINT enforcement runs.
- *   - If the tool name does not map to any known category, allow. Unknown
- *     tools (custom MCP connectors, future built-ins) should not be blocked
- *     by a closed-world allowlist.
+ *   - A tool the read-only rules or the write list do not know is allowed.
+ *     Unknown tools (custom MCP connectors, future built-ins) should not be
+ *     blocked by a closed-world list.
+ *   - Shell tools (Bash, PowerShell, Shell, Monitor) are never checked: not by
+ *     the write lock, not while a question is pending. This hook does not read
+ *     commands. Which commands a step should run is left to the step's
+ *     instructions and the AI client; parsing shell to prove a command safe
+ *     meant modelling every host's shell dialect, and each gap refused
+ *     legitimate work.
  *
  * Token stamping: for forge__update_state in any TRACKED session
  * (an active workflow, or a logged/linked observer session) this hook ALSO
@@ -55,8 +60,10 @@
  * which reads the RUNNING session's version from the rollout `session_meta`
  * (Codex Desktop can run a newer build than the `codex` binary on PATH), and
  * only falls back to a cached `codex --version` probe when no rollout version
- * is resolvable. All other logic is identical to the Claude Code source —
- * keep it that way on every plugin sync (/shiptoday-plugin).
+ * is resolvable. forge__update_state is read through hook-input's stateCall,
+ * because Codex can send `state_updates` as a JSON string; the approval check
+ * reads that normalized call too. All other logic is identical to the Claude
+ * Code source — keep it that way on every plugin sync (/shiptoday-plugin).
  *
  * @see plugin/hooks/token-usage.cjs for the transcript-parsing capture adapters
  * @see plugin/hooks/workflow-tracker.cjs for the state writes this hook reads
@@ -221,12 +228,13 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'forge__abandon_workflow',
   'forge__start_workflow',
   'forge__get_workflow_state', // Read-only recovery channel; safe to call mid-CHECKPOINT
-  // Feedback delivery — the in-workflow session_feedback step
-  // and the bundled forge-feedback skill instruct the model to call this. It is a
+  // Feedback delivery — the bundled forge-feedback skill, which the user
+  // starts and confirms, calls this (SHI-968: the session_feedback workflow step
+  // only points the user to it and never sends anything itself). It is a
   // Forge-owned tool that posts feedback to ShipToday (no user-domain mutation),
-  // so it must never be blocked by a CHECKPOINT or a step's category allowlist.
-  // Without this it was only permitted by the unknown-tool fail-open path, which
-  // breaks the moment it's called mid-checkpoint or a category pattern matches it.
+  // so it must never be blocked by a CHECKPOINT. Without this it was only
+  // permitted by the unknown-tool fail-open path, which breaks the moment it's
+  // called mid-checkpoint.
   'forge__send_feedback',
   // Question relay — the only way for the model to talk to the user mid-step
   'AskUserQuestion',
@@ -249,74 +257,102 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
 
 // Read-only MCP tool name prefixes (always-allowed during workflow time).
 const READONLY_PREFIXES = ['list_', 'get_', 'search_', 'query_', 'fetch_', 'read_', 'notion-search', 'notion-fetch', 'notion-get-'];
+// The same rule for connectors that name tools in camelCase (Atlassian:
+// getJiraIssue, searchConfluenceUsingCql, lookupJiraAccountId), so a Jira or
+// Confluence read passes while a question is pending just as a Linear or Notion
+// read does. Every Atlassian write starts with create/edit/add/update/
+// transition, so none of them matches.
+const READONLY_CAMEL_CASE = /^(?:get|search|lookup|fetch)[A-Z]/;
+// And for Slack, which puts every tool behind `slack_`, so its reads matched no
+// prefix above. The same read verbs, inside Slack's namespace; every Slack
+// write starts with send/schedule/create/update/add/complete.
+const READONLY_SLACK = /^slack_(?:read|search|list|get)_/;
+const READONLY_EXTRA_NAMES = new Set(['atlassianUserInfo']);
 
-// -- Category → tool patterns ----------------------------------------------
-// Maps the abstract categories the orchestrator publishes into concrete
-// tool name regexes. Each entry is checked against the bare tool name
-// (after stripping `mcp__<uuid>__`).
+// -- Write classification (SHI-966) ------------------------------------------
 //
-// The categories are deliberately coarse — the goal is to catch silent
-// bypass (e.g., Edit during readiness_check), not to micromanage every
-// connector. A skill that declares `tracker_write` gets every common
-// tracker-write tool; if a connector ships a new write verb, it slots in
-// without a registry update.
+// Which TOOLS write — what the write lock and the re-sync hold hold back.
+// Matched against the bare tool name, after the `mcp__<uuid>__` prefix is
+// stripped. Anything not listed here is NOT treated as a write — the guard
+// stays fail-open for tools it cannot classify, so a connector shipping a new
+// verb degrades to today's behaviour rather than blocking work nobody asked it
+// to block.
+const WRITE_PATTERNS = [
+  // Tracker — Linear, including its review/release surface, and GitHub/Jira below.
+  /^save_issue$/, /^create_issue$/, /^update_issue$/,
+  /^save_comment$/, /^create_comment$/, /^delete_comment$/,
+  /^save_milestone$/, /^save_project$/, /^save_document$/,
+  /^create_attachment$/, /^create_attachment_from_upload$/, /^delete_attachment$/, /^upload_attachments$/,
+  /^create_issue_label$/, /^save_issue_label$/, /^save_project_label$/,
+  /^retire_issue_label$/, /^retire_project_label$/, /^restore_issue_label$/, /^restore_project_label$/,
+  /^merge_diff$/, /^update_diff$/, /^save_diff_comment$/, /^delete_diff_comment$/,
+  /^submit_diff_review$/, /^resolve_diff_thread$/,
+  /^save_status_update$/, /^delete_status_update$/, /^save_release$/, /^save_release_note$/,
+  /^share_issue$/, /^unshare_issue$/,
+  // Atlassian (Rovo MCP): the Jira and Confluence write verbs it exposes.
+  /^createJiraIssue$/, /^editJiraIssue$/, /^updateJiraIssue$/, /^addCommentToJiraIssue$/,
+  /^transitionJiraIssue$/, /^createConfluencePage$/, /^updateConfluencePage$/,
+  /^createConfluenceFooterComment$/, /^createConfluenceInlineComment$/,
+  // GitHub MCP.
+  /^create_pull_request$/, /^merge_pull_request$/, /^update_pull_request(?:_branch)?$/,
+  /^create_pull_request_review$/, /^push_files$/, /^create_or_update_file$/, /^delete_file$/,
+  /^add_issue_comment$/, /^create_branch$/, /^create_repository$/, /^fork_repository$/,
+  /^create_label$/, /^create_draft$/,
 
-const CATEGORY_PATTERNS = {
-  read_code:    [/^Read$/, /^Grep$/, /^Glob$/],
-  ask_user:     [/^AskUserQuestion$/, /^(?:functions\.)?request_user_input(?:_async)?$/],
-  web:          [/^WebFetch$/, /^WebSearch$/],
+  // Docs — Notion writes, Claude Docs (batch/update/create/delete), Google
+  // Drive. Artifact and ArtifactData are told apart by action, below.
+  /^notion-create-/, /^notion-update-/, /^notion-move-/, /^notion-duplicate-/, /^notion-upload-/,
+  /^batch$/, /^update$/, /^create$/, /^delete$/,
+  /^create_file$/, /^update_file$/, /^gdrive_upload$/,
 
-  tracker_read: [
-    /^list_issues$/, /^get_issue$/, /^get_issue_status$/, /^list_issue_statuses$/,
-    /^list_issue_labels$/, /^list_project_labels$/, /^list_comments$/,
-    /^list_projects$/, /^get_project$/, /^list_milestones$/, /^get_milestone$/,
-    /^list_documents$/, /^get_document$/, /^search_documentation$/,
-    /^list_users$/, /^get_user$/, /^list_teams$/, /^get_team$/,
-    /^list_cycles$/, /^get_attachment$/, /^extract_images$/,
-    /^searchJiraIssuesUsingJql$/, /^getJiraIssue$/,
-    /^searchConfluenceUsingCql$/, /^getConfluencePage$/,
-    /^search_threads$/, /^get_thread$/, /^list_drafts$/, /^list_labels$/,
-  ],
-  tracker_write: [
-    /^save_issue$/, /^create_issue$/, /^update_issue$/,
-    /^save_comment$/, /^create_comment$/, /^delete_comment$/,
-    /^save_milestone$/, /^save_project$/, /^save_document$/,
-    /^create_attachment$/, /^delete_attachment$/, /^upload_attachments$/,
-    /^create_issue_label$/,
-    /^createJiraIssue$/, /^updateJiraIssue$/,
-    /^create_label$/, /^create_draft$/,
-  ],
+  // Messaging — the sending half of `messaging`; reads stay allowed.
+  /^slack_send_message$/, /^slack_send_message_draft$/, /^slack_schedule_message$/,
+  /^slack_create_/, /^slack_update_/, /^slack_add_/, /^slack_complete_file_upload$/,
+  /^send_message$/,
 
-  docs_read:    [
-    /^notion-search$/, /^notion-fetch$/, /^notion-get-comments$/,
-    /^notion-get-teams$/, /^notion-get-users$/,
-  ],
-  docs_write:   [
-    /^notion-create-/, /^notion-update-/, /^notion-move-/, /^notion-duplicate-/,
-  ],
+  // Calendar — the mutating half of `calendar`.
+  /^create_event$/, /^update_event$/, /^delete_event$/, /^respond_to_event$/,
 
-  messaging:    [/^slack_/, /^send_message$/],
-  calendar:     [
-    /^list_calendars$/, /^list_events$/, /^get_event$/, /^create_event$/,
-    /^update_event$/, /^delete_event$/, /^respond_to_event$/, /^suggest_time$/,
-  ],
-  design:       [
-    /^get_design_context$/, /^get_screenshot$/, /^get_metadata$/, /^get_figjam$/,
-    /^get_libraries$/, /^get_variable_defs$/, /^use_figma$/,
-    /^add_code_connect_map$/, /^get_code_connect_map$/, /^get_code_connect_suggestions$/,
-    /^get_context_for_code_connect$/, /^send_code_connect_mappings$/,
-    /^create_design_system_rules$/, /^search_design_system$/,
-    /^upload_assets$/, /^create_new_file$/, /^generate_diagram$/, /^whoami$/,
-  ],
-  meetings:     [
-    /^search_meetings$/, /^get_meeting_transcript$/, /^get_meetings$/,
-    /^list_meetings$/, /^list_meeting_folders$/, /^query_granola_meetings$/,
-    /^get_account_info$/,
-  ],
+  // Design — the mutating half of `design`.
+  /^create_new_file$/, /^upload_assets$/, /^add_code_connect_map$/,
+  /^send_code_connect_mappings$/, /^create_design_system_rules$/,
 
-  code_edit:    [/^Edit$/, /^Write$/, /^NotebookEdit$/, /^(?:functions\.)?apply_patch$/],
-  shell:        [/^Bash$/, /^PowerShell$/, /^Shell$/, /^Monitor$/],
+  // Local code.
+  /^Edit$/, /^MultiEdit$/, /^Write$/, /^NotebookEdit$/, /^(?:functions\.)?apply_patch$/,
+];
+
+// Tools whose one name covers reads and writes, told apart by `action`. An
+// absent action is the tool's default, which publishes. Reading an artifact
+// while locked is exactly the kind of denial that teaches people to work
+// around the guard, so the read actions pass.
+const ACTION_CLASSIFIED = {
+  Artifact: new Set(['read', 'list', 'open', 'quickstart']),
+  ArtifactData: new Set(['get', 'list', 'query']),
 };
+
+/** true/false for an action-classified tool, null when the tool is not one. */
+function actionWrites(bare, event) {
+  const reads = ACTION_CLASSIFIED[bare];
+  if (!reads) return null;
+  const input = event && event.tool_input;
+  const action = input && typeof input === 'object' && typeof input.action === 'string' ? input.action : null;
+  return !(action && reads.has(action));
+}
+
+// Tools that run a command. The guard never checks them — see the header.
+const SHELL_TOOLS = /^(?:Bash|PowerShell|Shell|Monitor)$/;
+
+/**
+ * Does this call write somewhere the write lock is meant to hold?
+ *
+ * Unclassified tools return false by design (fail-open) — see WRITE_PATTERNS.
+ * Shell tools never reach here; they are allowed before any layer runs.
+ */
+function isWriteTool(bare, event) {
+  const byAction = actionWrites(bare, event);
+  if (byAction !== null) return byAction;
+  return WRITE_PATTERNS.some((re) => re.test(bare));
+}
 
 // -- Helpers ----------------------------------------------------------------
 
@@ -345,196 +381,114 @@ function isUniversallyAllowed(bare) {
   for (const prefix of READONLY_PREFIXES) {
     if (bare.startsWith(prefix)) return true;
   }
-  return false;
-}
-
-function parsedToolInput(event) {
-  let input = event.tool_input || {};
-  try { if (typeof input === 'string') input = JSON.parse(input); } catch { return event.tool_input; }
-  return input;
-}
-
-function literalPathToken(value) {
-  const token = typeof value === 'string' ? value.trim() : '';
-  if (!token) return '';
-  if (token.startsWith("'") && token.endsWith("'") && !token.slice(1, -1).includes("'")) return token.slice(1, -1);
-  if (token.startsWith('"') && token.endsWith('"') && !/["\`$]/.test(token.slice(1, -1))) return token.slice(1, -1);
-  if (/^[A-Za-z]:[A-Za-z0-9_.\\/:\\-]+$/.test(token) || /^\/[A-Za-z0-9_./:\\-]+$/.test(token)) return token;
-  return '';
-}
-
-function isInstalledSkillPath(candidate) {
-  if (typeof candidate !== 'string') return false;
-  const normalized = candidate.replace(/\\/g, '/');
-  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return false;
-  if (/(?:^|\/)\.\.(?:\/|$)/.test(normalized)) return false;
-  return /(?:^|\/)\.(?:codex|claude|cursor)\/(?:skills|plugins(?:\/cache)?)\/.+\/SKILL\.md$/i.test(normalized);
-}
-
-// Some hosts expose a native Skill loader; Codex currently loads an installed
-// skill through its command bridge. Admit only an exact, literal, read-only
-// command targeting an installed SKILL.md. This is not a general shell grant.
-function isInstalledSkillRead(event, bare) {
-  if (!['Bash', 'PowerShell', 'Shell'].includes(bare)) return false;
-  const input = parsedToolInput(event);
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
-  const command = typeof input.command === 'string'
-    ? input.command.trim()
-    : (typeof input.cmd === 'string' ? input.cmd.trim() : '');
-  if (!command || command.length > 2000 || /[;&|\r\n<>]/.test(command)) return false;
-  const matches = [
-    command.match(/^Get-Content\s+-Raw\s+-LiteralPath\s+(.+)$/i),
-    command.match(/^Get-Content\s+-LiteralPath\s+(.+?)\s+-Raw$/i),
-    command.match(/^cat\s+(?:--\s+)?(.+)$/),
-  ];
-  const match = matches.find(Boolean);
-  return Boolean(match && isInstalledSkillPath(literalPathToken(match[1])));
-}
-
-function comparableAbsolutePath(candidate) {
-  if (typeof candidate !== 'string') return null;
-  let normalized = candidate.replace(/\\/g, '/');
-  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return null;
-  if (!/^[A-Za-z]:\/$/.test(normalized) && normalized !== '/') normalized = normalized.replace(/\/+$/, '');
-  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return null;
-  return /^(?:[A-Za-z]:\/|\/\/)/.test(normalized) ? normalized.toLowerCase() : normalized;
-}
-
-// Resolve through the nearest existing ancestor because visualization output
-// files are commonly new. This closes junction/symlink aliases into a
-// workspace without requiring the final file to exist yet.
-function resolvedComparablePath(candidate) {
-  if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) return null;
-  let existing = candidate;
-  const missingTail = [];
-  while (!fs.existsSync(existing)) {
-    const parent = path.dirname(existing);
-    if (parent === existing) return null;
-    missingTail.unshift(path.basename(existing));
-    existing = parent;
-  }
-  try {
-    const resolvedAncestor = fs.realpathSync.native(existing);
-    return comparableAbsolutePath(path.join(resolvedAncestor, ...missingTail));
-  } catch {
-    return null;
-  }
-}
-
-function isTaskOwnedVisualizationPath(candidate, event) {
-  if (typeof candidate !== 'string') return false;
-  const normalized = candidate.replace(/\\/g, '/');
-  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return false;
-  if (/(?:^|\/)\.\.(?:\/|$)/.test(normalized)) return false;
-  if (!/\.(?:html|svg)$/i.test(normalized)) return false;
-  if (!/(?:^|\/)\.(?:codex\/visualizations|claude\/artifacts|cursor\/artifacts)\/.+/i.test(normalized)) return false;
-
-  const targets = [comparableAbsolutePath(candidate), resolvedComparablePath(candidate)].filter(Boolean);
-  const roots = [event?.cwd, ...(Array.isArray(event?.workspace_roots) ? event.workspace_roots : []), process.cwd()]
-    .flatMap((root) => [comparableAbsolutePath(root), resolvedComparablePath(root)])
-    .filter(Boolean);
-  return !targets.some((target) => roots.some((root) => target === root || target.startsWith(`${root}/`)));
-}
-
-function conversationArtifactPaths(event, bare) {
-  const input = parsedToolInput(event);
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    if (!/^(?:functions\.)?apply_patch$/.test(bare) || typeof input !== 'string') return [];
-  }
-  if (['Write', 'Edit'].includes(bare)) {
-    const target = input.file_path || input.path;
-    return typeof target === 'string' ? [target] : [];
-  }
-  if (/^(?:functions\.)?apply_patch$/.test(bare)) {
-    const patchText = typeof input === 'string'
-      ? input
-      : (typeof input.patch === 'string' ? input.patch : input.input);
-    if (typeof patchText !== 'string') return [];
-    const fileOperations = [...patchText.matchAll(/^\*\*\* (Add|Update|Delete) File: (.+)$/gm)];
-    const moveDestinations = [...patchText.matchAll(/^\*\*\* Move to: (.+)$/gm)];
-    if (fileOperations.length === 0 || fileOperations.some((match) => match[1] === 'Delete')) return [];
-    return [
-      ...fileOperations.map((match) => match[2].trim()),
-      ...moveDestinations.map((match) => match[1].trim()),
-    ];
-  }
-  return [];
-}
-
-function isConversationArtifactWrite(event, bare, allowedCategories) {
-  if (!Array.isArray(allowedCategories) || !allowedCategories.includes('conversation_artifact')) return false;
-  const paths = conversationArtifactPaths(event, bare);
-  return paths.length > 0 && paths.every((candidate) => isTaskOwnedVisualizationPath(candidate, event));
-}
-
-// Codex does not adopt the broad local bounded-shell exception. The PR
-// revalidation command is a separate, exact read-only shape shared with the
-// server protocol, so it can cross a pinned checkpoint without permitting
-// arbitrary shell commands or Monitor.
-function isPrRevisionRead(event, bare) {
-  if (!['Bash', 'PowerShell'].includes(bare)) return false;
-  let input = event.tool_input || {};
-  try { if (typeof input === 'string') input = JSON.parse(input); } catch { return false; }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
-  const command = typeof input.command === 'string' ? input.command : '';
-  const match = /^gh pr view ([1-9]\d*) --repo https:\/\/github\.com\/(?!(?:\.|\.\.)\/)[A-Za-z0-9_.-]{1,200}\/(?!(?:\.|\.\.)(?: |$))[A-Za-z0-9_.-]{1,200} --json number,url,state,headRefOid$/.exec(command);
-  return Boolean(match && Number.isSafeInteger(Number(match[1])));
-}
-
-/**
- * Does the bare tool name match any pattern in the allowed categories?
- * Returns the matching category or null. If null, the tool either belongs
- * to a category not in the allowlist (deny) or to no known category (allow,
- * fail-open).
- */
-function categoryFor(bare) {
-  for (const [category, patterns] of Object.entries(CATEGORY_PATTERNS)) {
-    for (const pattern of patterns) {
-      if (pattern.test(bare)) return category;
-    }
-  }
-  return null;
-}
-
-function isAllowedByStepPermissions(bare, allowedCategories) {
-  const category = categoryFor(bare);
-  if (!category) return true; // Unknown tool — fail open
-  return allowedCategories.includes(category);
+  return READONLY_CAMEL_CASE.test(bare) || READONLY_SLACK.test(bare) || READONLY_EXTRA_NAMES.has(bare);
 }
 
 function buildCheckpointDenyReason(state, toolName) {
-  const responseField = state.pending_checkpoint_response_field || 'gate_answer';
+  // SHI-973: name the field the pending question actually uses. The tracker
+  // records it from the server's answer line; when it is unknown, say which
+  // field fits which kind of question rather than guess. The old fixed
+  // `gate_answer` default was wrong for every relayed question.
+  const field = state.pending_checkpoint_response_field;
+  const questionId = state.pending_checkpoint_question_id;
+  const withId = questionId ? ` with question_id "${questionId}"` : '';
+  const answerHow = field
+    ? `set state_updates.${field}${withId}`
+    : `use the field the pending question names — user_answer for a question, gate_answer for a step gate${withId}`;
+  const conversationId = state.conversation_id || '<conversation_id>';
   const lines = [
     `Forge workflow is at a CHECKPOINT awaiting user input (skill="${state.pending_checkpoint_step || 'unknown'}").`,
     `Tool "${toolName}" cannot proceed until the user has answered.`,
     ``,
-    'You have three options:',
+    'You have four options:',
     '  1. Relay the pending question with request_user_input, or give a numbered reply (numbered choices in your message) when request_user_input is not callable.',
-    `  2. Call forge__update_state with the user's answer (set state_updates.${responseField}).`,
-    '  3. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
-    '     Never abandon to skip the remaining steps: a post-step confirmation gate already offers the user "Stop here" for that — relay it.',
+    `  2. Call forge__update_state with the user's answer (${answerHow}).`,
+    `  3. If Forge's last reply did not arrive in full (for example the host saved it to a file instead of showing it), re-sync: call forge__get_workflow_state(conversation_id: "${conversationId}", instruction_chunk_bytes: 20000). When no question is pending, its reply releases this lock.`,
+    '  4. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
+    '     Never abandon to skip the remaining steps: if the user asks to stop, call forge__update_state with state_updates.stop_run: true — the run ends with its recap.',
     ``,
     'Do NOT silently bypass the workflow. The audit trail is how the team learns when workflows misroute.',
   ];
   return lines.join('\n');
 }
 
-function buildStepPermissionDenyReason(state, toolName, category) {
-  const skill = state.current_step_skill || state.current_skill || 'the active step';
-  const allowed = (state.current_step_tools || []).join(', ') || '(none)';
-  const lines = [
-    `Forge workflow step "${skill}" does not allow tool category "${category}".`,
-    `Tool "${toolName}" is in category "${category}". This step's allowed categories: ${allowed}.`,
-    ``,
-    'Likely you are trying to do work that belongs to a later step. Options:',
-    '  1. Continue the current step and call forge__update_state to advance — the next step may allow this tool.',
-    '  2. If the user must decide before this step can complete, ask with request_user_input, or give a numbered reply (numbered choices in your message) when request_user_input is not callable.',
-    '  3. Call forge__abandon_workflow with a meaningful reason ONLY if the workflow itself no longer applies (wrong workflow, user redirected).',
-    '     Never abandon to skip the remaining steps: a post-step confirmation gate already offers the user "Stop here" for that — relay it.',
-    ``,
-    'Do NOT silently bypass the workflow. The audit trail is how the team learns when workflows misroute.',
-  ];
-  return lines.join('\n');
+/**
+ * SHI-966: the step is set to Always asks and writes, and its write plan has
+ * not been approved yet. Name the one move that releases the lock.
+ */
+function buildWriteLockDenyReason(state, toolName) {
+  const step = (state.write_lock && state.write_lock.step_id) || state.current_step_skill || 'the active step';
+  return [
+    `Forge step "${step}" is set to Always asks: nothing is written until its write plan is approved.`,
+    `Tool "${toolName}" writes, so it cannot run yet.`,
+    '',
+    'Show the user ONE write plan for this step — what it will write, where, and a preview of the content — and ask them to approve it. Post their answer with forge__update_state; the approval releases the lock for the writes in that plan.',
+    'Skip and Keep as draft are valid answers: they complete the step with nothing written.',
+    '',
+    'Do NOT work around this by writing through a different tool. The lock is the control the admin chose.',
+  ].join('\n');
+}
+
+/**
+ * SHI-966 approval authenticity. A relayed question is the USER's to answer:
+ * an answer may be posted only after the host question tool was called or the
+ * user took a turn, both recorded against the pin (workflow-tracker and
+ * prompt-router). Returns the deny reason when an answer is being posted with
+ * neither, null when the call may proceed. Fail-open on anything unparseable
+ * and on a pin that carries no timestamp (an older state file).
+ */
+const ANSWER_FIELDS = ['user_answer', 'gate_answer'];
+
+function answerWithoutAsking(state, event) {
+  if (!state.active_workflow || !state.pending_checkpoint || !state.pending_checkpoint_at) return null;
+  let toolInput = event.tool_input || {};
+  if (typeof toolInput === 'string') {
+    try { toolInput = JSON.parse(toolInput); } catch { return null; }
+  }
+  const updates = toolInput && typeof toolInput === 'object' && toolInput.state_updates && typeof toolInput.state_updates === 'object'
+    ? toolInput.state_updates
+    : null;
+  if (!updates) return null;
+  // A stop writes nothing; an outcome without an answer (a dismissal, a
+  // delivery receipt, a resume request) answers nothing.
+  if (updates.stop_run === true) return null;
+  const answers = ANSWER_FIELDS.some((f) => updates[f] !== undefined)
+    || (updates.question_response && typeof updates.question_response === 'object' && updates.question_response.kind === 'decision');
+  if (!answers) return null;
+  const pinnedAt = Date.parse(state.pending_checkpoint_at);
+  if (!Number.isFinite(pinnedAt)) return null;
+  const askedAt = Date.parse(state.pending_checkpoint_asked_at || '');
+  const userTurnAt = Date.parse(state.pending_checkpoint_user_turn_at || '');
+  if ((Number.isFinite(askedAt) && askedAt >= pinnedAt) || (Number.isFinite(userTurnAt) && userTurnAt >= pinnedAt)) return null;
+  return buildUnaskedAnswerDenyReason(state);
+}
+
+function buildUnaskedAnswerDenyReason(state) {
+  const step = state.pending_checkpoint_step || state.current_step_skill || 'the active step';
+  return [
+    `Forge step "${step}" is waiting for the USER's answer, and no question has reached them since it was asked.`,
+    'An answer posted now would be yours, not theirs — and a write it approves would be recorded as approved by the user.',
+    '',
+    'Do ONE of these first:',
+    '  1. Ask the question with request_user_input, then post the user\'s actual answer with forge__update_state.',
+    '  2. If request_user_input is not callable, present the choices as a numbered list in your reply and STOP; post the answer after the user replies.',
+    '  3. If the user asked to stop, call forge__update_state with state_updates.stop_run: true.',
+    '',
+    'If you did ask before this question was recorded (a reply lost and recovered with forge__get_workflow_state), ask again — Forge accepts only answers given after the question it recorded.',
+    'Never answer a relayed question on the user\'s behalf, and never convert silence, a dismissal or an acknowledgment into an answer.',
+  ].join('\n');
+}
+
+function buildResyncDenyReason(state, toolName) {
+  const conversationId = state.conversation_id || '<conversation_id>';
+  return [
+    'Forge could not read which step the workflow moved to from its last reply, so the active step\'s write lock is unknown.',
+    `Tool "${toolName}" can write, so it is held until the step is confirmed. Reading is unaffected.`,
+    '',
+    `Call forge__get_workflow_state(conversation_id: "${conversationId}", instruction_chunk_bytes: 20000). Its reply names the active step and restores its write lock — or reports that the run has ended — and this hold lifts.`,
+    '',
+    'Do NOT work around this by writing through a different tool.',
+  ].join('\n');
 }
 
 // -- Main -------------------------------------------------------------------
@@ -605,6 +559,15 @@ async function main() {
     // Leave malformed ordinary calls for server validation, without rewriting
     // them into an apparently valid but corrupted object.
     if (!normalized) return;
+    // SHI-966 approval authenticity — before the checkpoint claim and any
+    // stamping, because a refusal must neither spend a claim nor rewrite the
+    // input. Codex reads the normalized call, so an answer sent inside a
+    // string state_updates is checked too. See answerWithoutAsking.
+    const unasked = answerWithoutAsking(state, { tool_input: normalized });
+    if (unasked) {
+      deny(unasked);
+      return;
+    }
     if (normalized.completed_step === 'session_observer' && normalized.state_updates.outcome === 'checkpoint') {
       let reason;
       try { reason = claim(sessionState, normalized, state); }
@@ -765,11 +728,17 @@ async function main() {
 
   // Beyond token stamping (above), the guard layers below apply only while a
   // workflow is active. A logged/linked observer session that reaches here on
-  // a non-update_state tool has no per-step allowlist to enforce.
+  // a non-update_state tool has no question or lock to hold it.
   if (!state.active_workflow) return; // No active workflow — allow.
 
   // Universals always pass — Forge orchestration, AskUserQuestion, read-only.
-  if (isUniversallyAllowed(bare) || isInstalledSkillRead(event, bare) || isPrRevisionRead(event, bare)) return;
+  if (isUniversallyAllowed(bare)) return;
+
+  // Shell always passes, before every layer: a pending question, a re-sync
+  // hold and the write lock never look at a command.
+  // Whether a command fits the step is the step's instructions and the AI
+  // client's call, not this hook's.
+  if (SHELL_TOOLS.test(bare)) return;
 
   // Layer 1: CHECKPOINT enforcement.
   if (state.pending_checkpoint) {
@@ -777,22 +746,32 @@ async function main() {
     return;
   }
 
-  // A visualization step may create only its host-owned conversation artifact.
-  // It never receives broad code_edit or shell permission, and repo paths stay
-  // protected by the ordinary category check below.
-  if (isConversationArtifactWrite(event, bare, state.current_step_tools)) return;
-
-  // Layer 2: per-step tool_permissions enforcement.
-  if (Array.isArray(state.current_step_tools) && state.current_step_tools.length > 0) {
-    const category = categoryFor(bare);
-    if (category && !state.current_step_tools.includes(category)) {
-      deny(buildStepPermissionDenyReason(state, bare, category));
-      return;
-    }
+  // The tracker could not read which step the last reply moved to, so this
+  // step's lock is unknown; the previous step's would fail open. Hold anything
+  // that can write until a re-sync names the step.
+  if (state.step_resync_required && isWriteTool(bare, event)) {
+    deny(buildResyncDenyReason(state, bare));
+    return;
   }
 
-  // Otherwise allow — no checkpoint pin, no per-step allowlist (or tool is
-  // not in any known category, or its category is allowed).
+  // The step's tool_permissions are not enforced here. They are the step's
+  // declared scope, published to the model, which follows them the same way it
+  // follows them for shell. Matching tool names to categories meant keeping a
+  // second, hand-written map of every connector's tools beside the server's
+  // declarations, and each gap in it refused work a step was told to do.
+
+  // Layer 2: the write lock (SHI-966). Only an Always-asks step that writes
+  // carries one, and only while its plan is unapproved — the server decides
+  // both and publishes the verdict as a single **Write Lock** line, which
+  // workflow-tracker records. No lock recorded means no lock: an older server
+  // never sends the line, and this plugin must not invent enforcement it was
+  // not told about.
+  if (state.write_lock && state.write_lock.state === 'on' && isWriteTool(bare, event)) {
+    deny(buildWriteLockDenyReason(state, bare));
+    return;
+  }
+
+  // Otherwise allow — no question pending, no re-sync hold, no lock holding a write.
 }
 
 main().catch(() => {
