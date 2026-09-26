@@ -7,8 +7,8 @@
 // with results safely. A single literal call whose reply was lost or failed
 // can still be IDENTIFIED (wrappedForgeCall), so the tracker can hold writes
 // the way it does for a direct call — identification only ever tightens.
-// get_workflow_state is read-only, but its reply re-syncs the CHECKPOINT pin
-// (SHI-973), so a wrapped call has to reach the tracker too.
+// get_workflow_state is read-only, but its reply re-syncs the CHECKPOINT pin,
+// so a wrapped call has to reach the tracker too.
 const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow|get_workflow_state)$/;
 
 function responseText(value, depth = 0) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * active-time.cjs — R1 idle-excluded engineering-time measurement.
+ * active-time.cjs — idle-excluded engineering-time measurement.
  *
  * Forge records `duration_ms` as raw wall-clock between two coarse activity
  * markers (step issued → step completed; checkpoint → checkpoint). Any wait
@@ -101,7 +101,7 @@ function activeMsFromRecords(records, sinceMs, nowMs) {
  * `resolveSessionRecords`) — the single-read path: workflow-guard and
  * stop-observer resolve the log once per invocation and feed the same records
  * to BOTH token capture and this function, instead of re-reading and
- * re-parsing multi-MiB files twice (review #10).
+ * re-parsing multi-MiB files twice.
  *
  * Truncated-log guard (review #8): the shared reader tail-reads files larger
  * than its byte cap, dropping the OLDEST records. That is safe for cumulative

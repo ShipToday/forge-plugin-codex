@@ -13,7 +13,7 @@ const { CHECKPOINT_INTERVAL } = require('./passive-observation.cjs');
 
 const FLUSH_INTERVAL = 3;
 const TIME_FLOOR_MS = 10 * 60 * 1000;
-// SHI-906: eligibility floor for the FIRST offer of a session — turns OR
+// Eligibility floor for the FIRST offer of a session — turns OR
 // active time OR a git milestone. Its placement below is load-bearing: it runs
 // BEFORE anything latches the fire-once flags, so an ineligible Stop never
 // spends the session's one offer without the user ever seeing it.
@@ -28,7 +28,7 @@ function skillContinuation(state) {
   const convo = state.conversation_id || '<conversation_id>';
   // `completed_step` must name the STEP. `current_skill` is the workflow id,
   // so it may label the run in prose but never stand in for the step: posting
-  // it made the model complete a step that does not exist (contract audit).
+  // it made the model complete a step that does not exist.
   // Every start that hands over a step names it now, so the placeholder is
   // left for a preflight-gated start whose step has not been revealed yet.
   const step = state.current_step_skill;
@@ -122,7 +122,7 @@ async function main() {
   if (state.status === 'dismissed' || state.observation_due) return;
   const turnsSince = state.turn_count - (state.last_observer_turn || 0);
   if (state.status === 'snoozed') {
-    // SHI-907: `declined_once` is deliberately NOT cleared on the re-offer —
+    // `declined_once` is deliberately NOT cleared on the re-offer —
     // it is what lets the returning offer acknowledge the earlier "no".
     if (turnsSince < CHECKPOINT_INTERVAL) return;
     session.write({ observation_due: { id: randomUUID(), reason: 'wake', queued_at: at,

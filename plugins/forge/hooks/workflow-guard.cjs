@@ -6,12 +6,12 @@
  * Fires before every tool call. Reads session state and decides whether the
  * tool may proceed. Two layers of enforcement:
  *
- *   1. CHECKPOINT enforcement (V1, #518): when the orchestrator has emitted
+ *   1. CHECKPOINT enforcement: when the orchestrator has emitted
  *      a relayed-question CHECKPOINT and the workflow-tracker hook has set
  *      `pending_checkpoint: true`, only AskUserQuestion / forge__update_state
  *      / forge__abandon_workflow / read-only inspection may proceed.
  *
- *   2. The write lock (SHI-966): while an Always-asks step's write plan is
+ *   2. The write lock: while an Always-asks step's write plan is
  *      unapproved, tools on the write list are held. The server decides the
  *      lock; the workflow-tracker hook records it.
  *
@@ -229,7 +229,7 @@ const ALWAYS_ALLOWED_BARE_NAMES = new Set([
   'forge__start_workflow',
   'forge__get_workflow_state', // Read-only recovery channel; safe to call mid-CHECKPOINT
   // Feedback delivery — the bundled forge-feedback skill, which the user
-  // starts and confirms, calls this (SHI-968: the session_feedback workflow step
+  // starts and confirms, calls this (the session_feedback workflow step
   // only points the user to it and never sends anything itself). It is a
   // Forge-owned tool that posts feedback to ShipToday (no user-domain mutation),
   // so it must never be blocked by a CHECKPOINT. Without this it was only
@@ -269,7 +269,7 @@ const READONLY_CAMEL_CASE = /^(?:get|search|lookup|fetch)[A-Z]/;
 const READONLY_SLACK = /^slack_(?:read|search|list|get)_/;
 const READONLY_EXTRA_NAMES = new Set(['atlassianUserInfo']);
 
-// -- Write classification (SHI-966) ------------------------------------------
+// -- Write classification ----------------------------------------------------
 //
 // Which TOOLS write — what the write lock and the re-sync hold hold back.
 // Matched against the bare tool name, after the `mcp__<uuid>__` prefix is
@@ -385,7 +385,7 @@ function isUniversallyAllowed(bare) {
 }
 
 function buildCheckpointDenyReason(state, toolName) {
-  // SHI-973: name the field the pending question actually uses. The tracker
+  // Name the field the pending question actually uses. The tracker
   // records it from the server's answer line; when it is unknown, say which
   // field fits which kind of question rather than guess. The old fixed
   // `gate_answer` default was wrong for every relayed question.
@@ -413,7 +413,7 @@ function buildCheckpointDenyReason(state, toolName) {
 }
 
 /**
- * SHI-966: the step is set to Always asks and writes, and its write plan has
+ * The step is set to Always asks and writes, and its write plan has
  * not been approved yet. Name the one move that releases the lock.
  */
 function buildWriteLockDenyReason(state, toolName) {
@@ -430,7 +430,7 @@ function buildWriteLockDenyReason(state, toolName) {
 }
 
 /**
- * SHI-966 approval authenticity. A relayed question is the USER's to answer:
+ * Approval authenticity. A relayed question is the USER's to answer:
  * an answer may be posted only after the host question tool was called or the
  * user took a turn, both recorded against the pin (workflow-tracker and
  * prompt-router). Returns the deny reason when an answer is being posted with
@@ -520,7 +520,7 @@ async function main() {
   // duration_ms stamp. Fires on EVERY forge__update_state, with NO session-state
   // precondition. Runs BEFORE the active_workflow guard below, because
   // observer-checkpoint calls happen with active_workflow=false (the
-  // observe_session workflow has already completed), and the legacy #657 path —
+  // observe_session workflow has already completed), and the legacy path —
   // which relies on the MODEL relaying the Stop-hook directive's token_usage —
   // drops them (observed: an ad_hoc session whose model never relayed, leaving
   // null token columns). The updatedInput rewrite makes capture independent of
@@ -559,7 +559,7 @@ async function main() {
     // Leave malformed ordinary calls for server validation, without rewriting
     // them into an apparently valid but corrupted object.
     if (!normalized) return;
-    // SHI-966 approval authenticity — before the checkpoint claim and any
+    // Approval authenticity — before the checkpoint claim and any
     // stamping, because a refusal must neither spend a claim nor rewrite the
     // input. Codex reads the normalized call, so an answer sent inside a
     // string state_updates is checked too. See answerWithoutAsking.
@@ -587,7 +587,7 @@ async function main() {
       const stateUpdates = { ...toolInput.state_updates };
       // Resolve the session log ONCE per invocation — token capture and the
       // active-time stamp below consume the same parsed records instead of
-      // each re-reading multi-MiB transcript files (review #10).
+      // each re-reading multi-MiB transcript files.
       const resolved = resolveSessionRecords(event);
       const tokens = captureTokenUsageFromResolved(resolved);
       // Track whether we enriched state_updates at all. Three independent stamps
@@ -598,7 +598,7 @@ async function main() {
       //     tracked update_state so the read side can collapse this session's
       //     rows across all its Forge conversations — this workflow + the
       //     observer — instead of counting one per conversation), and
-      //   - duration_ms (R1 idle-excluded active time; active-workflow steps only).
+      //   - duration_ms (idle-excluded active time; active-workflow steps only).
       let changed = typeof event.tool_input === 'string' || typeof event.tool_input?.state_updates === 'string';
       // Never clobber a token_usage the caller already set (defensive — the
       // model does not set it today, but a future client might). The one
@@ -634,7 +634,7 @@ async function main() {
         changed = true;
       }
 
-      // R1 active-time: stamp duration_ms with idle-excluded ACTIVE time for an
+      // Active time: stamp duration_ms with idle-excluded ACTIVE time for an
       // active-workflow step (window = [step_active_since, now]). The server
       // prefers state_updates.duration_ms over its wall-clock fallback,
       // so this replaces wall-clock with active time on
@@ -672,12 +672,12 @@ async function main() {
     return; // forge__update_state is universally allowed regardless.
   }
 
-  // R1 active-time on the ABANDON exit. forge__abandon_workflow carries no
+  // Active time on the ABANDON exit. forge__abandon_workflow carries no
   // state_updates, so without a stamp the server's __abandoned__ audit row
-  // falls back to wall-clock (now − stepStartedAt) — and abandon is the exit
+  // falls back to wall-clock (now − the step's start) — and abandon is the exit
   // most correlated with walking away (start a step, pause 3h, come back and
-  // abandon → 3h of idle banked as engineering time, the exact inflation R1
-  // removes on update_state). Stamp the idle-excluded active time of the
+  // abandon → 3h of idle banked as engineering time, the exact inflation active-time
+  // stamping removes on update_state). Stamp the idle-excluded active time of the
   // in-flight step as a top-level `duration_ms` input field; the tool handler
   // threads it into the audit row on the server. Same
   // guards as the update_state stamp: never clobber a caller-set value, and
@@ -701,7 +701,7 @@ async function main() {
         updated.client_session_id = event.session_id;
         changed = true;
       }
-      // R1 active-time (idle-excluded) for the in-flight step — only meaningful
+      // Active time (idle-excluded) for the in-flight step — only meaningful
       // while a step is active. Same guards as the update_state stamp.
       if (updated.duration_ms == null && state.active_workflow && state.step_active_since) {
         const activeMs = activeMsFromEvent(event, Date.parse(state.step_active_since));
@@ -760,7 +760,7 @@ async function main() {
   // second, hand-written map of every connector's tools beside the server's
   // declarations, and each gap in it refused work a step was told to do.
 
-  // Layer 2: the write lock (SHI-966). Only an Always-asks step that writes
+  // Layer 2: the write lock. Only an Always-asks step that writes
   // carries one, and only while its plan is unapproved — the server decides
   // both and publishes the verdict as a single **Write Lock** line, which
   // workflow-tracker records. No lock recorded means no lock: an older server
