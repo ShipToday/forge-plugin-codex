@@ -4,7 +4,9 @@
 // or infer that a mentioned tool ran: require a single literal tools.<name>()
 // call AND a recognizable Forge result. Multi-call/dynamic scripts need host
 // per-call receipts to associate inputs with results safely.
-const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow)$/;
+// get_workflow_state is read-only, but its reply re-syncs the CHECKPOINT pin
+// (SHI-973), so a wrapped call has to reach the tracker too.
+const FORGE_TOOL = /(?:^|__)forge__(?:start_workflow|update_state|abandon_workflow|get_workflow_state)$/;
 
 function responseText(value, depth = 0) {
   if (!value || depth > 8) return '';

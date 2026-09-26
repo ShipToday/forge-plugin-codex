@@ -1,30 +1,24 @@
 ---
 name: forge-autopilot
 description: >
-  Routes any product, engineering, or software development lifecycle (SDLC/PDLC)
-  activity to Forge. Invoke this skill whenever the user describes work that
-  involves the product development process — across any phase: discovery,
-  definition, planning, execution, review, handoff, release, or reporting.
-  This includes: building or shipping features, fixing bugs, writing PRDs,
-  breaking down stories, estimating, prioritizing, reviewing PRs, security
-  audits, vulnerability assessments, release readiness checks, deployment gates,
-  test planning and strategy, refactoring, mapping or documenting system
-  architecture across the codebase, reconstructing an architecture estate or
-  building an architecture atlas, or any similar SDLC activity. ALSO invoke
-  when the current user request directly targets a tracked work item key matching
-  "PROJ-123" / "BUG-42" / any "<UPPERCASE>-<digits>" id. Do NOT invoke for pure
-  coding requests ("write a function", "refactor this file", "add a test") or
-  continuation of already-scoped execution, even when a tracked key appears only
-  in earlier conversation context. Do NOT invoke for git operations, file editing,
-  applying already-scoped review feedback, resolving merge conflicts, publishing
-  an existing change, or general Q&A unrelated to a project.
+  Routes a request to Forge by ShipToday — ONLY when the user asks for Forge by
+  name. Invoke this skill when the user's current message contains "@forge",
+  "forge", "@shiptoday" or "shiptoday" (any case) and asks Forge to do something:
+  plan, define, implement, fix, review, estimate, ship, check status, or map
+  architecture. Also invoke when a Forge hook directive (FORGE ROUTING, FORGE
+  OBSERVATION, FORGE CHECKPOINT) explicitly tells you to. Do NOT invoke for any
+  message that does not name Forge — however much it looks like product or
+  engineering work, and even when it contains a tracked work item key such as
+  "PROJ-123": handle it normally. If the mention is ambiguous (for example "we
+  deploy with Laravel Forge"), ask whether the user meant Forge before invoking.
 ---
 
 # Forge Autopilot
 
-You are routing product development requests to Forge via the `forge` MCP
-server. The user does NOT need to say "forge" or "@forge" — detect their intent
-from the skill description above and call the right tool automatically.
+You are routing requests to Forge via the `forge` MCP server. Forge runs only
+when the user asks for it by name — see the **Trigger rule** in Step 2. A
+request that does not name Forge gets a normal response, however SDLC-shaped
+it is.
 
 Forge's workflow catalog lives on the server side and is fully data-driven.
 You don't need to know which workflows exist — `forge__start_workflow` will
@@ -39,18 +33,21 @@ which MCP tools are available in the current session:
 
 | Connector     | Look for these tool names                                      |
 |---------------|---------------------------------------------------------------|
-| jira          | searchJiraIssuesUsingJql, createJiraIssue, updateJiraIssue    |
-| linear        | list_issues, get_issue, create_issue, save_issue              |
-| github        | `gh` CLI available via shell, or GitHub connector tools         |
-| slack         | slack_send_message, slack_search_users, slack_search_channels |
-| confluence    | searchConfluenceUsingCql, getConfluencePage                   |
-| notion        | notion-search, notion-fetch, notion-create-pages              |
-| granola       | search_meetings, get_meeting_transcript                       |
-| figma         | get_design_context, get_screenshot, get_metadata              |
+| jira          | `searchJiraIssuesUsingJql`, `createJiraIssue`, `updateJiraIssue` |
+| linear        | `save_issue`, `save_comment`, `list_issue_statuses`           |
+| github        | GitHub MCP tools: `search_issues`, `add_issue_comment`, `search_code`, `get_file_contents`, `list_pull_requests` — or the gh CLI installed and authenticated |
+| slack         | `slack_send_message`, `slack_search_users`, `slack_search_channels` |
+| confluence    | `searchConfluenceUsingCql`, `getConfluencePage`               |
+| notion        | `notion-search`, `notion-fetch`, `notion-create-pages`        |
+| google_drive  | native integration — include only if connected                |
+| gmail         | native integration — include only if connected                |
+| granola       | `search_meetings`, `get_meeting_transcript`                   |
+| figma         | `get_design_context`, `get_screenshot`, `get_metadata`        |
 | local_code    | filesystem/shell access (always include in coding environments) |
 
 Only include connectors you can verify. Always include `local_code` when you
-have filesystem access.
+have filesystem access. The `forge__start_workflow` tool description carries
+the server's full list of signals per connector; this table is a subset of it.
 
 ## Step 1b: Detect local skills
 
@@ -112,12 +109,14 @@ the first remains visible. Record any required submitted receipt without an
 answer, and wait for the actual reply. This restriction is Codex-only:
 Claude Code continues to use `AskUserQuestion` and its existing wait protocol.
 
-### Continuation boundary — check before calling Forge
+### Trigger rule — check before calling Forge
 
-Use the full conversation, not only the user's latest sentence, to decide
-whether this is a new SDLC outcome or continuation of concrete work that is
-already scoped. Handle the request normally without starting Forge when the
-user is:
+Forge starts only when the user's **current message** asks for it by name: it
+contains `@forge`, `forge`, `@shiptoday` or `shiptoday` (any case) with a clear
+request for Forge. Nothing else starts a workflow. Without the keyword, handle
+the request normally, even when it is SDLC-shaped (plan, review, fix, ship,
+estimate) and even when it names a tracked work item key such as `PROJ-123`.
+That includes when the user is:
 
 - implementing specific changes already requested or reviewed in this session;
 - resolving a merge conflict or applying known review comments;
@@ -126,16 +125,25 @@ user is:
 - committing, pushing, creating, or updating a pull request for work already
   in progress.
 
-This boundary still allows Forge when the current request explicitly invokes
-Forge, directly names a tracked work item as the requested outcome's target, asks
-to run a catalog workflow (for example,
-"review this PR"), or asks for a new product/process outcome that has not
-already been scoped. The distinction is the requested outcome: **review a PR**
-is workflow-shaped; **apply these review changes and update the PR** is coding
-continuation. A work item key that appears only in earlier turns or as historical
-context does not override this boundary.
+A keyword in an earlier message does not carry over to a new request: judge
+each message on its own. If the mention is ambiguous — "we deploy with Laravel
+Forge", "forge ahead with the plan" — ask the user whether they meant Forge
+before calling anything, as a yes/no choice in the host's question UI when one
+is available, and start nothing on the mention alone. Once the user has said
+they did not mean Forge by ShipToday, do not ask again about the same kind of
+mention in this conversation. A message that tells you not to use Forge
+("don't use Forge for this") is not a request for it.
 
-For any product/SDLC request that passes this boundary, your **default action** is:
+Three things are not new requests, so they need no keyword: an answer to a
+question Forge asked, which continues the run already in progress; a
+`follow_up` the user chose when a workflow completed; and the hook-driven
+entries below (the session observer and its checkpoints), which start on a
+Forge hook directive, not on the user's words.
+
+**Whether the user asked is your call.** No hook reads their words to route,
+approve or block a start.
+
+For a request that names Forge, your **default action** is:
 
 → `forge__start_workflow(feature_request, connected_tools, local_skills: <detected_skills>)`
 
@@ -192,7 +200,7 @@ conversation and current phase**:
 
 ### Exception 1 — Help / recommendation request
 
-"What should I do with PROJ-123?", "help with PROJ-123", "where to start"
+"forge, what should I do with PROJ-123?", "@forge help with PROJ-123", "forge, where do I start?"
 
 → `forge__start_workflow(feature_request, connected_tools, recommendation: true, local_skills: <detected_skills>)`
 
@@ -233,8 +241,12 @@ Eligibility numbers describe the queued interval, not additional time spent idle
 before this prompt.
 
 A snoozed session also receives a short per-prompt `FORGE ROUTING` wake check
-naming its wake condition. Act on it only when the user's current message
-clearly satisfies that condition; otherwise say nothing about it.
+naming its wake condition. Wake — start the observe_session entry point below
+once the user's requested work is complete — when the user's current message
+asks Forge to track, or resume tracking, this session, or clearly satisfies
+that condition. If the message asks Forge for something else, handle that
+request and skip the check: their request comes first, and the tracking offer
+can wait. Otherwise say nothing about it.
 
 For **checkpoint**, read `delivered_checkpoint` and pass only its
 `conversation_id`, `completed_step`, and `state_updates` to the existing Forge
@@ -263,9 +275,12 @@ Delivery waits for a real user turn. If none arrives, or the session expires or
 delivery is interrupted, observation and queued timing may remain unrecorded.
 No background model turn or guaranteed end-of-session flush is provided.
 
-Triggered by the Codex passive delivery evaluation above (or an explicit request)
-— input contains "observe session" or
-"observe_session workflow".
+Triggered by the Codex passive delivery evaluation above — input contains
+"observe session" or "observe_session workflow". A hook directive, not the
+user's words, starts it, so it needs no Forge keyword. The user can also ask
+for it: a message that asks Forge to track, or resume tracking, this session
+("@forge resume tracking this session") takes this route too — not the catalog
+route in Step 2, which cannot reach the observer.
 
 → `forge__start_workflow(feature_request: "Passive session observation", connected_tools, workflow: "observe_session", local_skills: <detected_skills>)`
 
@@ -342,7 +357,7 @@ Follow them:
 
 1. Execute each step as instructed
 2. Follow the returned question-delivery instructions. Forge may deliver a native MCP form and return the answered step directly; do not ask the same question again after RE-ENTRY. Otherwise use only a question tool available and permitted by this host. Use blocking `request_user_input` only when it is actually callable in the current mode; never use `request_user_input_async` for Forge decisions (see Codex question lifetime), and do not ask permission to use the native UI. If no compatible native tool is callable, render bounded choices as a numbered list (`1.`, `2.`, `3.`...) and tell the user to enter one number; for multi-select, ask for comma-separated numbers. Keep genuinely open-ended prompts as free text.
-3. A tool submission acknowledgment means submitted, not displayed or answered. Wait for the actual user answer before dependent work. Preserve the question ID, step token, option order and labels. Post the actual answer through the returned `user_answer` or `gate_answer` path. Never convert dismissal, failure, empty input, an invalid/out-of-range number, or a preselected default into `TBD` or approval. Keep the decision identifiable to the user. Read-only recovery does not re-present; use `question_resume: true` with the returned identity on an explicit resume.
+3. A tool submission acknowledgment means submitted, not displayed or answered. Wait for the actual user answer before dependent work. Preserve the question ID, step token, option order and labels. Post the actual answer through the returned `user_answer` path. Never convert dismissal, failure, empty input, an invalid/out-of-range number, or a preselected default into `TBD` or approval. Keep the decision identifiable to the user. Read-only recovery does not re-present; use `question_resume: true` with the returned identity on an explicit resume.
 4. After completing each step, call `forge__update_state` with the results
    AND the `step_token` from the most recent response (see below)
 5. If Forge returns `needsDisambiguation` or `needsIntentClassification`,
@@ -351,7 +366,8 @@ Follow them:
 ### Workflow guard — what is enforced
 
 Forge installs a `PreToolUse` hook (`workflow-guard.cjs`) that **denies**
-tool calls when the active step does not allow them. Two layers:
+tool calls in two situations: while a question is waiting for the user, and
+while a write is waiting for the user's approval. Two layers:
 
 **Layer 1 — CHECKPOINT enforcement.** When the orchestrator returns a
 `**CHECKPOINT**` response from `forge__update_state` (a relayed-question
@@ -363,17 +379,28 @@ user has answered are:
 - `forge__abandon_workflow` — exit when the workflow no longer applies (see
   below; it is not a way to end a run early)
 - Read-only inspection: filesystem reads and search, plus read-only MCP tools
-  (names starting with `list_`, `get_`,
-  `search_`, `query_`, `fetch_`, `notion-search`, `notion-fetch`)
+  (names starting with `list_`, `get_`, `search_`, `query_`, `fetch_`,
+  `read_`, `notion-search`, `notion-fetch`, `notion-get-`, and Slack's
+  `slack_read_`, `slack_search_`, `slack_list_`, `slack_get_`)
 - `ToolSearch` may be used to discover the deferred Forge recovery tools.
 - Task coordination can be requested, but Codex child tasks do not inherit the
   parent hook session; Forge cannot enforce this checkpoint inside another
   task. Do not use that boundary to advance the pinned workflow.
 
-**Layer 2 — Per-step `tool_permissions`.** Every step transition publishes
-a `**Tool Permissions**: cat1, cat2, …` line listing the categories the
-active step is allowed to use. The hook denies any tool whose category
-is not in the list. Categories are coarse:
+The hook does not check shell commands, here or anywhere (see below). While a
+question is pending, the instructions still apply: wait for the user's answer,
+and use the shell only to inspect, never to act on the decision being asked.
+
+**Layer 2 — the write lock.** A step set to Always asks that writes carries a
+`**Write Lock**: on` line until its write plan is approved. Until then the hook
+holds write tools (tracker, docs and messaging writes, code-host connector
+writes, `apply_patch` and other file edits). Post the write plan, get it
+approved, then write.
+
+**Per-step `tool_permissions` — follow them; the hook does not enforce them.**
+Every step transition publishes a `**Tool Permissions**: cat1, cat2, …` line
+listing the categories the active step is meant to use. Staying inside them is
+your job, the same as for shell. Categories are coarse:
 
 | Category | Tools |
 |----------|-------|
@@ -382,18 +409,26 @@ is not in the list. Categories are coarse:
 | `web` | web fetch and web search tools |
 | `tracker_read` | `list_issues`, `get_issue`, `list_comments`, `search_threads`, … |
 | `tracker_write` | `save_issue`, `create_issue`, `save_comment`, `update_issue`, … |
-| `docs_read` / `docs_write` | Notion read / write |
+| `docs_read` / `docs_write` | Notion, Confluence, Google Drive and Linear documents — read / write |
 | `messaging` | Slack send |
 | `calendar` / `design` / `meetings` | Per-connector groups |
 | `conversation_artifact` | task-owned `.html`/`.svg` backing file for an inline renderer; never a repository file |
 | `code_edit` | code-editing tools such as `apply_patch` or editor writes |
-| `shell` | shell execution tools |
+| `shell` | Commands that change or publish things (builds, tests, commits, pushes, PRs), plus the code-host connector writes (`create_pull_request`, `merge_pull_request`, `push_files`, …) |
 
-Concretely: `readiness_check` does not allow `code_edit` or `shell`, so
-editing during it is denied. `begin_code_execution` allows both,
-so editing during it is allowed. `notify_tech_lead` allows `messaging`
-but not `tracker_write` — the model can send a Slack message but not
-silently rewrite the ticket.
+Concretely: a readiness check does not include `code_edit` or `shell`, so do
+not edit during it. A code-execution step includes both. A triage step that
+only reads the ticket includes `tracker_read` but not `tracker_write` — read
+the ticket's comments, but do not post to or rewrite the ticket.
+
+**Shell is not checked by the hook.** Shell commands always pass — a pending
+question and the write lock never look at a command. Following the step's
+permissions is your job here too: a step without
+`shell` may run read-only commands (git and `gh` reads, file listings, package
+audits) and nothing that changes or publishes anything; a `gh` issue write
+counts as `tracker_write`; under the write lock, run no command that publishes
+until the write plan is approved. Command examples in step instructions are
+illustrative — any equivalent read-only command is fine.
 
 Anything denied gets an actionable reason that points at the three
 legitimate next moves: relay the user question, advance
@@ -403,12 +438,8 @@ the workflow itself no longer applies). This is not a security boundary:
 wrapper may not expose every call to the hook.
 
 If you receive a deny decision for a tool you genuinely need, the right
-move is usually to advance the workflow — the next step's allowlist
-likely includes the tool you want.
-
-If you receive a deny decision for a tool you genuinely need, the right
-move is usually to advance the workflow — the next step's allowlist
-likely includes the tool you want.
+move is to get the user's answer or the write plan's approval first — that is
+what the hook is waiting for.
 
 ### Step token — pass it back on every `update_state`
 
@@ -499,13 +530,14 @@ the classifier picked the wrong workflow, or scope changed mid-stream — call
 conversation. This is the **only** correct way to exit a workflow without
 completing it.
 
-- **Not for ending a run early.** When a post-step confirmation gate is
-  pending it already offers **Stop here**, which ends the run, keeps
-  everything produced, and records which steps did not run. Relay that gate
-  and let the user choose. Deciding on your own that the remaining steps are
-  unnecessary is not a reason to abandon — an abandon at a gate is recorded
-  as such in the audit trail, and the recap names the steps that did not
-  run.
+- **Not for ending a run early.** Workflows run straight through — there is
+  no pause between steps. When the user asks to stop, call
+  `forge__update_state` for the current step with
+  `state_updates: { stop_run: true, step_token: "<the current token>" }`,
+  even while a question is waiting for them. Forge ends the run with a recap
+  of everything produced and the steps that did not run, and does not mark it
+  abandoned. Deciding on your own that the remaining steps are unnecessary is
+  not a reason to stop or abandon — that is the user's call.
 - **Do NOT silently bypass** the workflow by skipping `forge__update_state`
   calls and proceeding directly with implementation. Silent bypass leaves
   the audit trail blind to *why* the workflow stopped applying — the team
@@ -531,7 +563,7 @@ not match the recommended tier.
 The response metadata contains a line like:
 
 ```
-**Model Routing**: tier=balanced | model=gpt-5.6-terra | environment=codex | guidance=codex_model_map | complexity=medium | task=planning
+**Model Routing**: tier=balanced | model=gpt-6-sol | environment=codex | guidance=codex_model_map | complexity=medium | task=planning
 ```
 
 The `tier` value tells you which capability tier to use. The optional `model`
@@ -609,8 +641,8 @@ When it comes out yes, three things matter:
 
 - **Give away the judgment, keep the step.** Hand the fault-finding to the
   fresh agent; keep the mechanical checks, the rendering, and — when the step
-  ends in a gate or relayed question — the gate and the `forge__update_state`
-  hand-off. Delegating a gated step whole forces the sub-agent to relay the
+  ends in a relayed question — the question and the `forge__update_state`
+  hand-off. Delegating such a step whole forces the sub-agent to relay the
   entire envelope back to you, which is the most fragile part of the contract.
   A split prompt is **not** the standard payload — see rule 4 below.
 - **Check that "fresh" is actually fresh.** On some hosts a spawned sub-agent
@@ -746,16 +778,14 @@ to start over.
 
 ## What NOT to route
 
-Regular coding tasks should be handled normally without Forge:
+The line is the **Trigger rule** in Step 2, nothing else: route only a
+current message that asks Forge for something by name. Without that, handle
+the request normally — whatever it is about:
 
-- "Write a function that..." — pure code
-- "Refactor this component" — pure code (unless tied to a ticket)
-- "Add a test for..." — pure code
-- "Read this file" / "explain this code" — exploration
-- "Commit my changes" / "push to main" — git operations
-- "What does this error mean?" — debugging Q&A
-
-The line: if the user is talking about the **product development process**
-(planning, scoping, tracking, handing off, reviewing against requirements,
-auditing, releasing), route to Forge. If they're just writing code directly,
-don't.
+- "Write a function that..." / "refactor this component" / "add a test for..."
+- "Read this file" / "explain this code" / "what does this error mean?"
+- "Commit my changes" / "push to main"
+- "Plan the release", "review this PR against the requirements", "break
+  PROJ-123 into stories" — product-development work too, but not a request
+  for Forge until the user names it
+- "Review this PR directly, without using Forge" — the user has said no

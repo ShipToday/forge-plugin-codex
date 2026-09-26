@@ -31,8 +31,7 @@ function acknowledgeCommand(sessionId, id) {
 }
 
 // Returns developer-context TEXT for this prompt, or ''. prompt-router.cjs
-// joins it with any routing text and wraps the result once, so routing and
-// passive delivery never compete for the same prompt.
+// wraps it once as additionalContext.
 function deliver(session, state, event) {
   const at = new Date().toISOString();
   if (state.active_workflow || state.pending_checkpoint) return '';
@@ -64,13 +63,21 @@ function deliver(session, state, event) {
   const due = state.observation_due;
   // A snoozed session is checked against its wake condition on every prompt
   // (as in the Claude Code plugin); the eight-turn re-offer queued by stop-observer.cjs
-  // takes precedence on the prompt it lands on.
+  // takes precedence on the prompt it lands on. The condition is the user's own
+  // words, so it is quoted as one bounded line and reads as data. This hook
+  // cannot tell a wake-up from a request the user is making of Forge right now
+  // (it never reads the message), so the directive leaves that to the model: a
+  // request to (resume) tracking IS the wake-up, and any other Forge request
+  // comes first.
   if (state.status === 'snoozed' && !due && state.wake_condition) {
     return `FORGE ROUTING: The tracking offer in this session is snoozed. Wake condition: ` +
-      `"${oneLine(state.wake_condition)}". If the user's current message clearly satisfies it, invoke the ` +
-      `"forge-autopilot" skill via the Skill tool with the input "observe session — start the observe_session ` +
-      `workflow for passive tracking" after completing the user's request. Otherwise continue normally and ` +
-      `do NOT mention this check to the user.`;
+      `${JSON.stringify(oneLine(state.wake_condition))}. To wake, invoke the "forge-autopilot" skill via the ` +
+      `Skill tool with the input "observe session — start the observe_session workflow for passive tracking" ` +
+      `after completing the user's request. Wake if the user's current message asks Forge to track, or resume ` +
+      `tracking, this session. If it asks Forge for something else, handle that request and skip this check — ` +
+      `their request comes first, and the tracking offer can wait for a later turn. Otherwise wake only if the ` +
+      `message clearly satisfies the wake condition. If not, continue normally and do NOT mention this check ` +
+      `to the user.`;
   }
   if (!due) return '';
   if (!UUID_RE.test(String(due.id || ''))) { session.write({ observation_due: null }); return ''; }

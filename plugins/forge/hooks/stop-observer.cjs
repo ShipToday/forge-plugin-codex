@@ -26,17 +26,23 @@ const ACTIVE_FLOOR_MS = 5 * 60 * 1000;
 // event.stop_hook_active guards a second block — so it can never loop.
 function skillContinuation(state) {
   const convo = state.conversation_id || '<conversation_id>';
-  const step = state.current_step_skill || state.current_skill || 'the current step';
+  // `completed_step` must name the STEP. `current_skill` is the workflow id,
+  // so it may label the run in prose but never stand in for the step: posting
+  // it made the model complete a step that does not exist (contract audit).
+  // Every start that hands over a step names it now, so the placeholder is
+  // left for a preflight-gated start whose step has not been revealed yet.
+  const step = state.current_step_skill;
+  const label = step || state.current_skill || 'the current step';
   return JSON.stringify({
     decision: 'block',
     reason:
-      `FORGE WORKFLOW — do not stop yet. A local skill ran while the Forge step "${step}" is ` +
+      `FORGE WORKFLOW — do not stop yet. A local skill ran while the Forge step "${label}" is ` +
       `still in progress, and the turn ended WITHOUT calling forge__update_state. A skill ` +
       `instruction like "reply with only your output / nothing else" governs that skill's ` +
       `OUTPUT FORMAT only — it does NOT end the workflow step. Briefly relay the skill's key ` +
       `findings, then call forge__update_state (conversation_id: ${convo}, completed_step: ` +
-      `${step}, …) to complete the step. Calling forge__update_state is mandatory before this ` +
-      `turn may end.`,
+      `${step || '<the current step id from the last Forge reply>'}, …) to complete the step. ` +
+      `Calling forge__update_state is mandatory before this turn may end.`,
   });
 }
 
