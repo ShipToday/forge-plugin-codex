@@ -1067,14 +1067,14 @@ async function main() {
   }
 
   // Codex: an update_state reply this hook does not take state from still
-  // leaves the active step unknown, unless it is the server's own error
-  // refusal (`isError` or `Error:`; the run did not move). Keeping the
-  // previous step's lock would fail open, so writes are held until
+  // leaves the active step unknown, unless it is the server's own `Error:`
+  // refusal (the run did not move). A failed call the host reports for any
+  // other reason — a transport failure, an internal error — may have moved it.
+  // Keeping the previous step's lock would fail open, so writes are held until
   // forge__get_workflow_state re-syncs — the same hold the step re-sync below
   // sets. Holding only tightens the guard; nothing is released on such a reply.
   const holdForResync = () => {
-    if (!isStateUpdate || toolResponse?.isError === true || toolResponse?.is_error === true
-      || /^\s*Error: /.test(responseText(toolResponse))) return;
+    if (!isStateUpdate || /^\s*Error: /.test(responseText(toolResponse))) return;
     if (sessionState.read().active_workflow) sessionState.write({ step_resync_required: true });
   };
 
@@ -1225,7 +1225,15 @@ async function main() {
     if (typeof callInput === 'string') { try { callInput = JSON.parse(callInput); } catch { return; } }
     const tracked = sessionState.read();
     if (tracked.active_workflow && callInput?.conversation_id && callInput.conversation_id !== tracked.conversation_id) return;
-    if (toolResponse?.isError || toolResponse?.is_error) return;
+    // A failed call never advances local state. Only the server's own `Error:`
+    // refusal proves the run did not move; a transport failure or an internal
+    // error, which the host reports the same way, may have advanced it.
+    if (toolResponse?.isError || toolResponse?.is_error) {
+      if (tracked.active_workflow && !/^\s*Error: /.test(responseText(toolResponse))) {
+        sessionState.write({ step_resync_required: true });
+      }
+      return;
+    }
     if (header.expiry === false) {
       if (tracked.active_workflow) sessionState.write({ step_resync_required: true });
       return;
@@ -1410,10 +1418,9 @@ async function main() {
     // (its shell and no lock, into a step that may be locked), so the step is
     // marked unverified and workflow-guard holds writes until
     // forge__get_workflow_state re-syncs it. The one exception is the server's
-    // own error reply (`isError` or `Error:`): the call was refused and the
-    // run did not move.
-    const refused = toolResponse?.isError === true || toolResponse?.is_error === true
-      || /^\s*Error: /.test(responseText(toolResponse));
+    // own `Error:` reply: the call was refused and the run did not move.
+    // (A failed call returned above; this covers an unflagged `Error:` reply.)
+    const refused = /^\s*Error: /.test(responseText(toolResponse));
     if (header.marker) {
       sessionState.write({ step_resync_required: false });
     } else if (!header.complete && !refused && sessionState.read().active_workflow) {

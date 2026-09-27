@@ -57,15 +57,6 @@ function holdLapsed(idleMs, ttl) {
   return idleMs >= (ttl || TTL_MS) + RECOVERY_GRACE_MS;
 }
 
-function workflowTtl(state) {
-  const days = state?.workflow_expiry?.days;
-  return Number.isInteger(days) && days >= 1 && days <= 7 ? days * 86400000 : null;
-}
-
-function holdLapsed(idleMs, ttl) {
-  return idleMs >= (ttl || TTL_MS) + RECOVERY_GRACE_MS;
-}
-
 // Older installed hooks delete root state files after one day. Keep a small
 // recovery record below that cleanup boundary. Its presence restores a hold,
 // never permission to write; only a server response can verify the run again.
