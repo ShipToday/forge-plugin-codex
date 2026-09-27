@@ -197,13 +197,37 @@ function bareStepId(stepId) {
   return index === -1 ? stepId : stepId.slice(0, index);
 }
 
-function resyncFromStateRead(sessionState, toolResponse) {
+function expiryMetadata(text) {
+  const match = text.match(/^\*\*Workflow Expiry\*\*: (.+)$/m);
+  if (!match) return null;
+  try {
+    const value = JSON.parse(match[1]);
+    if (Number.isInteger(value.days) && value.days >= 1 && value.days <= 7
+      && ['setting', 'default', 'fallback'].includes(value.source)) return { days: value.days, source: value.source };
+  } catch { /* malformed metadata is not recovery authority */ }
+  return false;
+}
+
+function startHeader(response) {
+  const lines = trustedText(response).split(/\r?\n/);
+  const start = lines.findIndex(line => line.startsWith('**Conversation ID**:'));
+  if (start < 0) return '';
+  let end = start;
+  while (end < lines.length && lines[end].trim()) end++;
+  return lines.slice(start, end).join('\n');
+}
+
+function resyncFromStateRead(sessionState, toolResponse, toolInput) {
   const state = sessionState.read();
-  if (!state.active_workflow) return;
+  if (toolResponse?.isError || toolResponse?.is_error) return;
+  if (typeof toolInput === 'string') { try { toolInput = JSON.parse(toolInput); } catch { return; } }
+  const requested = toolInput?.conversation_id;
   const lines = responseText(toolResponse).split('\n');
   const start = lines.findIndex((line) => line.startsWith('Workflow state for conversation `'));
   const conversation = start === -1 ? null : lines[start].match(/^Workflow state for conversation `([^`]+)`/);
-  if (!conversation || conversation[1] !== state.conversation_id) return;
+  if (!conversation || (requested && conversation[1] !== requested)) return;
+  if (state.active_workflow && conversation[1] !== state.conversation_id && !state.workflow_binding_pending) return;
+  if ((!state.active_workflow || state.workflow_binding_pending) && conversation[1] !== requested) return;
 
   // Read the status only from the reply's own header block — the status line
   // and its metadata lines, up to the first blank line. The recovered findings
@@ -214,6 +238,10 @@ function resyncFromStateRead(sessionState, toolResponse) {
   const header = [];
   while (index < lines.length && lines[index].trim()) header.push(lines[index++]);
   const statusLine = header[0] || '';
+  const headerText = header.join('\n');
+  const expiry = expiryMetadata(headerText);
+  const token = headerText.match(/^\*\*Step Token\*\*: `([^`]+)`/m)?.[1];
+  if (expiry === false) return;
 
   // The run is over, and its final reply (or the stop or abandon reply) never
   // arrived here: the recovery hold it left would otherwise wait forever on a
@@ -238,12 +266,26 @@ function resyncFromStateRead(sessionState, toolResponse) {
       write_lock: null,
       current_step_skill: null,
       step_resync_required: false,
+      workflow_recovery_required: false,
+      workflow_binding_pending: false,
+      workflow_expiry: null,
+      current_step_token: null,
       last_checkpoint_at: new Date().toISOString(),
     });
     return;
   }
 
   const pendingStep = extractPendingCheckpointStep(statusLine);
+  // New bindings and modern snapshots need a complete token-bearing header.
+  if ((!state.active_workflow || state.workflow_recovery_required || expiry) && !token) return;
+  const recovered = {
+    active_workflow: true, conversation_id: conversation[1],
+    workflow_activity_at: new Date().toISOString(),
+    workflow_recovery_required: false, step_resync_required: false,
+    workflow_binding_pending: false,
+    ...(token ? { current_step_token: token } : {}),
+    ...(expiry ? { workflow_expiry: expiry } : {}),
+  };
   if (pendingStep) {
     const metadata = extractPendingCheckpointMetadata(toolResponse);
     // A recovery that re-serves the question already pinned keeps the pin time
@@ -253,6 +295,10 @@ function resyncFromStateRead(sessionState, toolResponse) {
     const sameQuestion = state.pending_checkpoint === true
       && (!metadata.questionId || !state.pending_checkpoint_question_id || metadata.questionId === state.pending_checkpoint_question_id);
     sessionState.write({
+      ...recovered,
+      current_step_skill: bareStepId(pendingStep),
+      current_step_tools: extractToolPermissions(headerText),
+      write_lock: extractWriteLock(headerText) || state.write_lock,
       pending_checkpoint: true,
       pending_checkpoint_step: bareStepId(pendingStep),
       pending_checkpoint_at: sameQuestion && state.pending_checkpoint_at ? state.pending_checkpoint_at : new Date().toISOString(),
@@ -266,6 +312,7 @@ function resyncFromStateRead(sessionState, toolResponse) {
   const nextStep = statusLine.match(/^\*\*NEXT STEP\*\*:\s*"([^"]+)"/);
   if (!nextStep) return;
   sessionState.write({
+    ...recovered,
     pending_checkpoint: false,
     pending_checkpoint_step: null,
     pending_checkpoint_at: null,
@@ -299,7 +346,7 @@ const MARKER_LINE = /^\*\*(?:(NEXT STEP)\*\*:\s*|(CHECKPOINT|RE-ENTRY)\*\*\s+—
 // Permissions and Step Token, so leaving it out
 // ended the header at that line — the lock went unread and the Step Token
 // after it fell into the body.
-const METADATA_LINE = /^\*\*(?:Idempotent Retry|Model Routing|Tool Permissions|Write Lock|Step Token|Question ID|Response Field)\*\*:/;
+const METADATA_LINE = /^\*\*(?:Idempotent Retry|Model Routing|Tool Permissions|Write Lock|Step Token|Workflow Expiry|Question ID|Response Field)\*\*:/;
 const DISPLAY_BLOCK_OPEN = /^(?:> \*\*Relay to the user\*\*|<<<FORGE_DISPLAY_VERBATIM\b)/;
 const DISPLAY_BLOCK_CLOSE = '<<<END FORGE_DISPLAY_VERBATIM>>>';
 // The caption the server puts above a finished step's `## Findings` block.
@@ -587,6 +634,8 @@ function parseReplyHeader(response, { wrapped = false } = {}) {
     // the write lock is authorization state, and a body that could name a
     // released lock would unlock the guard.
     writeLock: extractWriteLock(header.join('\n')),
+    expiry: expiryMetadata(header.join('\n')),
+    stepToken: header.join('\n').match(/^\*\*Step Token\*\*: `([^`]+)`/m)?.[1],
     // A marker means the run goes on. Without one, the status line completes
     // the run when it counts the last step, or when it is a skill's.
     complete: !kind && !!status && (!counts || counts[1] === counts[2]),
@@ -955,7 +1004,7 @@ async function main() {
   // Codex: a failed read said nothing, so it re-syncs nothing.
   if (toolName.includes(WORKFLOW_STATE_READ_PATTERN)) {
     if (toolFailed) return;
-    resyncFromStateRead(sessionState, toolResponse);
+    resyncFromStateRead(sessionState, toolResponse, event.tool_input);
     return;
   }
 
@@ -1057,6 +1106,11 @@ async function main() {
       // Active time: the first step begins now. workflow-guard reads this as
       // the lower bound of the active-time window it stamps onto duration_ms.
       step_active_since: new Date().toISOString(),
+      workflow_recovery_required: false,
+      workflow_binding_pending: false,
+      workflow_expiry: expiryMetadata(startHeader(toolResponse)) || null,
+      workflow_activity_at: new Date().toISOString(),
+      current_step_token: startHeader(toolResponse).match(/^\*\*Step Token\*\*: `([^`]+)`/m)?.[1] || null,
     };
     // Pin the observe_session conversation id separately so the periodic
     // Stop-hook checkpoint can target it after the workflow completes —
@@ -1131,6 +1185,19 @@ async function main() {
       // A completed-observer checkpoint is NOT completion of another active
       // workflow. It must not reset the already-reserved time boundary.
       return;
+    }
+    let callInput = event.tool_input;
+    if (typeof callInput === 'string') { try { callInput = JSON.parse(callInput); } catch { return; } }
+    const tracked = sessionState.read();
+    if (tracked.active_workflow && callInput?.conversation_id && callInput.conversation_id !== tracked.conversation_id) return;
+    if (header.expiry === false || toolResponse?.isError || toolResponse?.is_error) {
+      if (tracked.active_workflow) sessionState.write({ step_resync_required: true });
+      return;
+    }
+    if (tracked.workflow_recovery_required) return;
+    if (header.marker && header.stepToken) {
+      sessionState.write({ current_step_token: header.stepToken, workflow_activity_at: new Date().toISOString(),
+        ...(header.expiry ? { workflow_expiry: header.expiry } : {}) });
     }
     // The wake condition and work item are recorded below, validated, with the
     // rest of the observer outcome (extractObserverEvent).

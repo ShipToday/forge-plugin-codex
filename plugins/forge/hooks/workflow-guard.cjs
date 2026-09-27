@@ -515,6 +515,23 @@ async function main() {
   const state = sessionState.read();
   const bare = bareName(toolName);
 
+  const call = require('./tool-event.cjs').identifyForgeCall(event);
+  const recoveryId = call?.input?.conversation_id;
+  const isRecovery = call?.name.endsWith('forge__get_workflow_state');
+  const isUpdate = call?.name.endsWith('forge__update_state');
+  if ((isRecovery || isUpdate) && typeof recoveryId === 'string' && recoveryId) {
+    const sameRun = state.active_workflow && state.conversation_id === recoveryId;
+    const observer = !state.active_workflow && state.last_observer_conversation_id === recoveryId;
+    if (!sameRun && !observer && (!state.active_workflow || (isRecovery && state.workflow_binding_pending))) {
+      Object.assign(state, sessionState.write({ active_workflow: true, conversation_id: recoveryId,
+        step_resync_required: true, workflow_recovery_required: true, workflow_binding_pending: true }));
+    }
+    if (isUpdate && state.workflow_recovery_required) {
+      deny('Recover this workflow with forge__get_workflow_state before updating it. Its current question and write lock must be restored first.');
+      return;
+    }
+  }
+
   // Stamp cumulative token usage onto Forge's own
   // forge__update_state call — the deterministic analog of the server-side
   // duration_ms stamp. Fires on EVERY forge__update_state, with NO session-state

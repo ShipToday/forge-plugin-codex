@@ -20,7 +20,8 @@
  * that session's file.
  *
  * State files live in {os.tmpdir()}/forge-observer/{key}.json and
- * auto-expire after 12 hours (matching Forge's server-side TTL).
+ * retain active workflow guards for the server-provided idle window.
+ * Passive and legacy session state still expires after 12 idle hours.
  *
  * This module is deterministic — no AI, no network calls.
  */
@@ -35,12 +36,68 @@ const crypto = require('crypto');
 // -- Constants ---------------------------------------------------------------
 
 const STATE_DIR = path.join(os.tmpdir(), 'forge-observer');
-// Idle window, not a lifetime cap: state is reset once a session has gone this
-// long without a WRITE (see read()). A live session refreshes its own mtime, so
-// this only fires on genuine inactivity.
+// Passive/legacy idle window, measured from the last local write. Active
+// workflows with expiry metadata use confirmed server activity instead.
 const TTL_MS = 12 * 60 * 60 * 1000;      // 12 hours idle
 const CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours — auto-clean stale files
 
+function workflowTtl(state) {
+  const days = state?.workflow_expiry?.days;
+  return Number.isInteger(days) && days >= 1 && days <= 7 ? days * 86400000 : null;
+}
+
+// Older installed hooks delete root state files after one day. Keep a small
+// recovery record below that cleanup boundary. Its presence restores a hold,
+// never permission to write; only a server response can verify the run again.
+function recoveryPath(fp) { return path.join(STATE_DIR, 'workflow-recovery', path.basename(fp)); }
+function recoverGuard(fp, sessionId, base = freshState(sessionId)) {
+  try {
+    const saved = JSON.parse(fs.readFileSync(recoveryPath(fp), 'utf8'));
+    if (!saved.active_workflow || typeof saved.conversation_id !== 'string' || !saved.conversation_id) return null;
+    return { ...base, ...saved, step_resync_required: true, workflow_recovery_required: true };
+  } catch { return null; }
+}
+function persistRecovery(fp, state) {
+  const target = recoveryPath(fp);
+  if (!state.active_workflow || (!workflowTtl(state) && !state.workflow_recovery_required)) {
+    try { fs.unlinkSync(target); } catch { /* absent */ }
+    return;
+  }
+  const saved = {};
+  for (const key of ['active_workflow', 'conversation_id', 'workflow_expiry', 'workflow_activity_at',
+    'workflow_binding_pending']) saved[key] = state[key];
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, JSON.stringify(saved), { encoding: 'utf8', mode: 0o600 });
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(temp, target); break; }
+      catch (error) {
+        if (attempt >= 3 || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+  } finally { try { fs.unlinkSync(temp); } catch { /* renamed or absent */ } }
+}
+
+function idleState(state, lastTouched, sessionId, fp) {
+  // An older client may recreate a deleted root file as fresh/inactive. Only
+  // a confirmed ending removes our protected record, so keep its hold.
+  if (!state.active_workflow) {
+    const recovery = recoverGuard(fp, sessionId, state);
+    if (recovery) return recovery;
+  }
+  const ttl = state.active_workflow ? workflowTtl(state) : null;
+  const confirmed = ttl && Date.parse(state.workflow_activity_at);
+  const lastActivity = Number.isFinite(confirmed) ? confirmed : lastTouched;
+  if (Date.now() - lastActivity < (ttl || TTL_MS)) return state;
+  // Local age is not proof that the server run ended. Keep its guard until
+  // recovery confirms the step or its end; unrelated hooks cannot revive it.
+  if (state.active_workflow && (ttl || state.workflow_recovery_required)) {
+    return { ...state, step_resync_required: true, workflow_recovery_required: true };
+  }
+  return freshState(sessionId);
+}
 // -- Helpers -----------------------------------------------------------------
 
 // TEMPORARY DIAGNOSTIC — remove once the cwd-change trigger is identified.
@@ -297,6 +354,10 @@ function cleanupStale() {
       const fp = path.join(STATE_DIR, file);
       const stat = fs.statSync(fp);
       if (now - stat.mtimeMs > CLEANUP_AGE_MS) {
+        if (file.endsWith('.json')) {
+          const state = JSON.parse(fs.readFileSync(fp, 'utf8'));
+          if (state.active_workflow && (workflowTtl(state) || state.workflow_recovery_required)) continue;
+        }
         fs.unlinkSync(fp);
       }
     }
@@ -348,24 +409,26 @@ function forSession(sessionId) {
   // merge into, and so revive, the dead session's workflow, CHECKPOINT pin and
   // allowlist. An expired file is replaced even when unreadable.
   function readForWrite() {
-    try { if (Date.now() - fs.statSync(fp).mtimeMs > TTL_MS) return freshState(sessionId); } catch { /* no file yet */ }
-    if (!fs.existsSync(fp)) return freshState(sessionId);
+    if (!fs.existsSync(fp)) return recoverGuard(fp, sessionId) || freshState(sessionId);
     let last;
     for (let i = 0; i < 4; i += 1) {
-      try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch (error) { last = error; sleepSync(10); }
+      try { return idleState(JSON.parse(fs.readFileSync(fp, 'utf8')), fs.statSync(fp).mtimeMs, sessionId, fp); } catch (error) { last = error; sleepSync(10); }
     }
+    const recovery = recoverGuard(fp, sessionId);
+    if (recovery) return recovery;
+    if (Date.now() - fs.statSync(fp).mtimeMs > TTL_MS) return freshState(sessionId);
     throw new Error(`Forge session state is unreadable; refusing to overwrite it: ${last?.message || 'parse failure'}`);
   }
 
   function writeRaw(state) {
+    persistRecovery(fp, state);
     writeFileAtomic(fp, JSON.stringify(state, null, 2));
   }
 
   /**
    * Read this session's state.
-   * Returns a fresh state if the file doesn't exist or the session has been
-   * IDLE longer than TTL_MS. Also triggers cleanup of files older than
-   * CLEANUP_AGE_MS.
+   * Applies the passive/legacy idle window and preserves active workflow
+   * recovery holds. Also cleans old files without active recovery state.
    *
    * Pure read — never persists. A read that materialised state made "never
    * seen this session" indistinguishable from "seen it, and it says no
@@ -380,43 +443,24 @@ function forSession(sessionId) {
     ensureDir();
     cleanupStale();
 
-    if (!fs.existsSync(fp)) return freshState(sessionId);
+    if (!fs.existsSync(fp)) return recoverGuard(fp, sessionId) || freshState(sessionId);
 
     try {
       const raw = fs.readFileSync(fp, 'utf8');
       const state = JSON.parse(raw);
 
-      // Staleness is measured from the last WRITE (file mtime), not from
-      // session_start — a sliding idle window rather than an absolute cap.
-      //
-      // The absolute form reset a session purely for having lasted a long time,
-      // which is not what the TTL is for: its job is session-boundary detection
-      // ("you left overnight, start fresh"), and that is an IDLE concept. The
-      // old form silently wiped active_workflow, current_step_tools,
-      // pending_checkpoint, step_active_since and the checkpoint baseline in the
-      // middle of any run past the cap — observed on a 5.5h workflow, where it
-      // disarmed the CHECKPOINT pin and the per-step allowlist and stopped the
-      // engineering-time checkpoint from ever firing again.
-      //
-      // Sliding needs no touch-on-read: prompt-router writes turn_count on every
-      // user turn and workflow-tracker writes on every PostToolUse, so any live
-      // session refreshes its own mtime continuously, while a genuinely idle one
-      // still ages out on schedule. Deliberately NOT "never expire while
-      // active_workflow" — a workflow abandoned without the hook observing it
-      // (crash, force-quit, model never calls abandon) would pin the state
-      // forever and leave a stale allowlist enforcing indefinitely.
+      // Passive/legacy sessions use local mtime; active runs use their last
+      // server-confirmed activity and retain a recovery hold after expiry.
       let lastTouchedMs;
       try {
         lastTouchedMs = fs.statSync(fp).mtimeMs;
       } catch {
         lastTouchedMs = new Date(state.session_start).getTime();
       }
-      if (Date.now() - lastTouchedMs > TTL_MS) return freshState(sessionId);
-
-      return state;
+      return idleState(state, lastTouchedMs, sessionId, fp);
     } catch {
-      // Corrupted file — start fresh (still without persisting).
-      return freshState(sessionId);
+      // Preserve a protected recovery hold if the root cannot be read.
+      return recoverGuard(fp, sessionId) || freshState(sessionId);
     }
   }
 

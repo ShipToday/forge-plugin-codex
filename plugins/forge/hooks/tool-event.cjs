@@ -139,4 +139,17 @@ function wrappedForgeCall(event) {
   return call ? call.name : null;
 }
 
-module.exports = { normalizeToolEvent, wrappedForgeCall, responseText };
+// Pre-call identity only: never execute the script or treat this as success.
+function identifyForgeCall(event) {
+  if (WRAPPERS.includes(event.tool_name)) {
+    const call = literalForgeCall(event);
+    const input = call && literalInput(call.tokens, call.callIndex + 4);
+    return input ? { name: call.name, input } : null;
+  }
+  if (!FORGE_TOOL.test(event.tool_name || '')) return null;
+  let input = event.tool_input;
+  if (typeof input === 'string') { try { input = JSON.parse(input); } catch { return null; } }
+  return input && typeof input === 'object' && !Array.isArray(input) ? { name: event.tool_name, input } : null;
+}
+
+module.exports = { normalizeToolEvent, wrappedForgeCall, responseText, identifyForgeCall };
