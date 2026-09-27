@@ -515,18 +515,17 @@ async function main() {
   const state = sessionState.read();
   const bare = bareName(toolName);
 
+  // An update to a run this session does not hold, or holds for recovery, waits
+  // for forge__get_workflow_state: the run's question and write lock are
+  // unknown here. Nothing is bound before the server answers. workflow-tracker
+  // binds the run from its snapshot, and a run the server no longer has binds
+  // nothing; binding first held writes for runs that had expired or never
+  // existed, and no reply could lift that hold.
   const call = require('./tool-event.cjs').identifyForgeCall(event);
-  const recoveryId = call?.input?.conversation_id;
-  const isRecovery = call?.name.endsWith('forge__get_workflow_state');
-  const isUpdate = call?.name.endsWith('forge__update_state');
-  if ((isRecovery || isUpdate) && typeof recoveryId === 'string' && recoveryId) {
-    const sameRun = state.active_workflow && state.conversation_id === recoveryId;
-    const observer = !state.active_workflow && state.last_observer_conversation_id === recoveryId;
-    if (!sameRun && !observer && (!state.active_workflow || (isRecovery && state.workflow_binding_pending))) {
-      Object.assign(state, sessionState.write({ active_workflow: true, conversation_id: recoveryId,
-        step_resync_required: true, workflow_recovery_required: true, workflow_binding_pending: true }));
-    }
-    if (isUpdate && state.workflow_recovery_required) {
+  const callId = call?.input?.conversation_id;
+  if (call?.name.endsWith('forge__update_state') && typeof callId === 'string' && callId) {
+    const untracked = !state.active_workflow && state.last_observer_conversation_id !== callId;
+    if (untracked || state.workflow_recovery_required) {
       deny('Recover this workflow with forge__get_workflow_state before updating it. Its current question and write lock must be restored first.');
       return;
     }

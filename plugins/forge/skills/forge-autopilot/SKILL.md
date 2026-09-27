@@ -462,9 +462,18 @@ advances to a new step. The token rotates on every real step advance.
 
 ### Sub-agent relay — verify the envelope, fetch canonical state when absent
 
+An agent in a separate client session does not inherit the parent's local
+question or write guard. Before that agent's first `forge__update_state` for
+the run, it must call `forge__get_workflow_state` with the conversation id and
+follow the returned question, token, and write lock. Reuse that agent's
+session for later steps when possible; recovery is needed once per new
+session, not after each step in the same session. If the child cannot
+recover the run, keep the workflow update in the parent's session.
+
 If you delegate a step to a sub-agent, pass the current step's token
 into the sub-agent prompt verbatim — the sub-agent threads it through
-its own `update_state` call. The orchestrator's response to that call
+its own `update_state` call, using the current token from recovery if
+it differs. The orchestrator's response to that call
 (carrying the *new* `step_token` and the next step's instructions) is
 delivered to whoever made the MCP call: the sub-agent. The sub-agent
 MUST return that response to you (the parent) **VERBATIM**.
