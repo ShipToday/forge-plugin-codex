@@ -515,6 +515,22 @@ async function main() {
   const state = sessionState.read();
   const bare = bareName(toolName);
 
+  // An update to a run this session does not hold, or holds for recovery, waits
+  // for forge__get_workflow_state: the run's question and write lock are
+  // unknown here. Nothing is bound before the server answers. workflow-tracker
+  // binds the run from its snapshot, and a run the server no longer has binds
+  // nothing; binding first held writes for runs that had expired or never
+  // existed, and no reply could lift that hold.
+  const call = require('./tool-event.cjs').identifyForgeCall(event);
+  const callId = call?.input?.conversation_id;
+  if (call?.name.endsWith('forge__update_state') && typeof callId === 'string' && callId) {
+    const untracked = !state.active_workflow && state.last_observer_conversation_id !== callId;
+    if (untracked || state.workflow_recovery_required) {
+      deny('Recover this workflow with forge__get_workflow_state before updating it. Its current question and write lock must be restored first.');
+      return;
+    }
+  }
+
   // Stamp cumulative token usage onto Forge's own
   // forge__update_state call — the deterministic analog of the server-side
   // duration_ms stamp. Fires on EVERY forge__update_state, with NO session-state
