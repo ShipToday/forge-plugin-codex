@@ -528,12 +528,37 @@ Empty padding hurts readability.
 
 Surface this to the admin as part of the per-skill summary so they
 explicitly decide whether their skill needs the field — same posture
-as the SDLC stage proposal above.
+as the SDLC stage proposal above. Put it in their terms ("this step
+shows findings, so they're kept if another agent runs it"), not as the
+field and payload it becomes.
 
 Render the full proposal to the admin: workflow-level fields first,
 then the ordered step list. For each step, also show the resolved
 `applicable_expression` you've chosen and (if applicable) the
 canonical default you copied from the catalog skill.
+
+### Present the proposal in plain language
+
+"Full" means every decision, not every byte you will send. The admin
+is approving what the workflow will do, so show it the way they would
+read it:
+
+- **Describe a new skill; don't paste it.** Say in a few sentences what
+  its `instructions` tell the AI to do — what it reads, what it
+  decides, what it shows, and whether it writes anything — and offer
+  the exact text for review. Paste the full body only when they ask
+  for it.
+- **Never show the plumbing.** The `display_text` and state fields a
+  skill reports back, `forge__save_workflow` payloads and
+  `field_schema` entries are how the workflow runs, not what the admin
+  is deciding. Say what they achieve instead; don't show their shape.
+- **Plain Markdown only.** Tables, lists and headings render in every
+  client. HTML such as `<details>` does not, and shows up as literal
+  tags.
+
+Field names still belong where the admin is choosing a value —
+`sdlc_stage`, `confirmation_policy`, `admin_only` — each next to what
+the value means.
 
 Set an `example_invocation` — the copyable "try saying" hint shown on
 the dashboard. It MUST start with the Forge wake word `forge, ` followed
@@ -689,14 +714,22 @@ an admin sets Never asks on a step that writes.
 
 Show the final structured plan — workflow fields, ordered `steps`
 (with `skill_id` and resolved `applicable_expression`),
-`example_invocation`, and any `new_skills` being created.
+`example_invocation`, and any `new_skills` being created. Present it
+as Step 4's *Present the proposal in plain language* says: a new skill
+is described, not pasted.
 
-Then state the durable consequence, in your own words, before the
-question — the same care Step D3 takes over deletion, for the same
-reason. Saving is the moment this workflow leaves the catalog's update
-path, and it is the one effect the admin cannot discover afterwards:
-there is no drift indicator anywhere in the product, so a copy that has
-fallen behind looks identical to one that has not.
+Then state what saving does, in your own words, before the question.
+Which statement is true depends on what the save creates — the same
+override-or-new distinction Step 2c and Step 3b draw. A workflow id
+that is already in the Step 1 catalog, at any scope, makes this an
+override; an id no scope has makes it a brand-new workflow.
+
+**Saving an override of an existing workflow** — state the durable
+consequence, with the same care Step D3 takes over deletion, for the
+same reason. Saving is the moment this workflow leaves the catalog's
+update path, and it is the one effect the admin cannot discover
+afterwards: there is no drift indicator anywhere in the product, so a
+copy that has fallen behind looks identical to one that has not.
 
 > "Saving makes this your org's own copy of <workflow name>. It will run
 > exactly as configured here — but it stops receiving Forge's updates to
@@ -704,6 +737,13 @@ fallen behind looks identical to one that has not.
 > changed gating, and revised default policies won't reach it. Nothing
 > flags that later, and the only way back is to delete the override,
 > which loses this configuration."
+
+**Saving a brand-new workflow** — there is no Forge copy for it to fall
+behind, so the warning above would be false. Say this instead:
+
+> "This is a new workflow. It runs exactly as configured here, and
+> there are no Forge updates it will miss — it changes only when you
+> edit it."
 
 Say it once, plainly, and do not repeat it after they answer. Then ask the
 admin to choose "Save", "Keep editing", or "Cancel". If blocking
