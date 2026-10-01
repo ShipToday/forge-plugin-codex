@@ -55,6 +55,25 @@ in sync.
 > names, never hardcode the editable set, and never assume a field is
 > nullable / required without checking its manifest entry.
 
+## How to ask the admin
+
+Any question with a fixed set of answers goes through blocking
+`request_user_input` when it is callable; never use
+`request_user_input_async`, whose picker can close before the admin
+answers. That covers scope, who can run the workflow, a yes/no, a pick
+from the catalog, and whether the draft is right. One call carries up
+to three questions of two or three options each, and the admin can
+type anything else, so put the decisions a step needs into one call
+instead of asking them one by one. Make it the only tool call in that
+response, and wait for the answer. Otherwise list the choices as
+numbered text in one message and wait for the answer.
+
+Keep prose for questions with no fixed answers: the Step 2 intake
+("describe it in your own words"), or asking what to change after the
+admin picked "Change something". A proposal or plan you show before a
+question stays in your message text; the question carries only what
+you are asking and its options.
+
 ## Authoring overrides requires the baseline
 
 When an admin wants to **override an existing workflow** at a narrower
@@ -83,7 +102,10 @@ response shape:
     "orgRole", "orgId", "userId", "tier",
     "teams": [{ "id", "name", "description" }, ...]
   },
-  "capabilities": [{ "id", "label", "consuming", "producing" }, ...],
+  "state_categories": [{ "id", "label", "description" }, ...],
+  "capabilities": [{ "id", "label", "consuming", "producing",
+                     "required_needs": ["<state category id>", ...] }, ...],
+  "capability_prerequisites": { "<capability id>": ["<state category id>", ...] },
   "field_schema": {
     "workflow_preset": [ /* manifest entries — see Step 4 */ ],
     "preset_step":     [ /* manifest entries — see Step 4 */ ],
@@ -180,7 +202,8 @@ Classify the answer against two paths. Look for verbs and objects:
 
 If the intent is truly ambiguous ("change the bug workflow" — create
 a new one or modify/delete an existing one?), ask one clarifying
-question before routing. Do NOT assume.
+question before routing, the way "How to ask the admin" describes. Do
+NOT assume.
 
 ### Step 2c: Is authoring the right tool at all?
 
@@ -212,12 +235,13 @@ the drawer rather than authoring:
 
 > "That's a per-step setting — you can change it on the Workflows page
 > without making your own copy of <workflow name>, which keeps it
-> receiving Forge's updates. Want me to author a custom version anyway,
-> or would you rather change it there?"
+> receiving Forge's updates."
 
-Ask; do not decide for them. An admin who wants their own copy is
-entitled to one — the point is that they should be choosing it, not
-arriving at it because authoring was the only path offered.
+Then ask the admin to choose "Change it on the Workflows page" or
+"Author a custom version anyway", the way "How to ask the admin"
+describes. Ask; do not decide for them. An admin who wants their own
+copy is entitled to one — the point is that they should be choosing
+it, not arriving at it because authoring was the only path offered.
 
 ## Step 3: Match intent against the catalog you already fetched
 
@@ -366,6 +390,41 @@ purpose based on its `name`, `description`, and (if drafted) its
 so the admin sees what was inferred and can change it in the same
 edit pass — do not silently set the value.
 
+### State needs: what a skill must read before it runs
+
+For **every** new skill, decide its `needs` from what its instructions
+cannot run without, using the ids and descriptions in
+`catalog.state_categories`. Most skills need none. Do not infer `needs`
+from a broad workflow label or from the mere presence of a tracker or
+repository.
+
+Three things decide whether a category is right:
+
+- **It resolves inside the step, not before it.** When a declared
+  category is missing, Forge adds an instruction at the top of that
+  step to resolve it (ask for the ticket key, scan the repository). The
+  step's own `{{field}}` placeholders and its `applicable_expression`
+  are evaluated first, so they cannot rely on what the step resolves.
+  Reference those fields from a later step, or have the instructions
+  read them after resolving.
+- **`work_item` on the first step makes the workflow require a
+  ticket.** A request without one is refused at start, or the user is
+  asked for a key. If the skill reads a ticket only when one is linked,
+  leave `work_item` out. If a catalog skill that declares `work_item`
+  must run first in a workflow that also runs without a ticket, set
+  that step's `step_options` to `{ "workItemOptional": true }`.
+- **An override keeps its baseline.** If the skill overrides a system
+  skill, start with the baseline skill's `needs` (from
+  `catalog.skills`) and retain them unless the admin explicitly changes
+  the behavior. An omitted `needs` is saved empty; it does not inherit.
+
+If the catalog has no `state_categories` (an older server), keep any
+baseline `needs` exactly as they are and do not add or drop categories
+you cannot check against the catalog.
+
+Propose the resulting `needs` and why each applies alongside the skill
+summary, so the admin can correct it before saving.
+
 ### Capabilities: what a skill READS beyond its own inputs
 
 `catalog.capabilities` lists what this server can feed a skill at run
@@ -389,6 +448,19 @@ spec", "check the acceptance criteria", "find the requirements" or
 in one line — the same way you propose an SDLC stage. Do not set it
 silently, and do not add it to a skill that only writes, asks
 questions, or routes.
+
+Some capabilities only work with a state category in `needs`.
+`catalog.capability_prerequisites` maps each such capability to the
+categories it requires (the same values appear as `required_needs` on
+`catalog.capabilities`), and it also covers built-in capabilities that
+authoring never offers but an override carries over from its baseline.
+Add those categories to the skill's `needs` for every capability it
+consumes, and for a capability it produces when it reports a detection
+for the repository it is working in (a survey whose report names each
+repository itself is exempt). Add each category once, and explain it
+in plain language. If the admin does not want that read, revise the
+skill and its capability declaration together; do not leave a declared
+capability without its prerequisites.
 
 Two rules:
 
@@ -441,19 +513,41 @@ brand-new custom workflow it renders as `other` until someone sets
 it. Say which of those you are doing in the proposal summary rather
 than letting the admin discover it on the dashboard.
 
-### Visibility: `admin_only` is an explicit question, never a silent default
+### Scope and visibility: ask both together
 
-`admin_only` is access control, not a label — it decides whether the
-whole team can run the workflow or only org admins. Treat it like the
-org-vs-team scope decision: **ask**, don't infer.
+Scope (the whole org, or one team) and `admin_only` are access control,
+not labels. **Ask** both; don't infer either. Ask them together — in
+the same `request_user_input` call when it is callable, otherwise as
+numbered choices in one message — along with the draft check from
+Step 5 when the proposal is ready:
 
-Ask it as a plain either/or alongside scope, e.g.:
+- **Scope** — "Where should this workflow live?": "Whole org" (every
+  team can run it), or a team by name (only that team can run it).
+- **Access** — "Who can run this workflow?": "Everyone (default)"
+  (anyone in that scope can see and run it), or "Org admins only"
+  (hidden from members; you can open it up later from the Workflows
+  page).
 
-> **Who can run this workflow?**
-> 1. **Everyone in the org** (default)
-> 2. **Org admins only**
+Take the team options from `caller.teams`. A `request_user_input`
+question takes two or three options, so list "Whole org" plus the one
+or two teams that fit the intent best, and let a typed answer cover the
+rest: match a typed team name against `caller.teams`, and ask again if
+it matches none. When the admin already named the scope, drop that
+question and ask only the rest.
 
-Rules:
+When `caller.teams` is empty or missing, still ask; don't assume the
+workflow is org-wide. An empty list can mean the org has no teams, but
+also that the team lookup failed, and the catalog returns the same
+empty list either way. Say what you saw rather than claiming the org
+has none — "I couldn't find any teams in your org. Where should this
+workflow live?" — and offer two options: "Whole org" (every member can
+run it) or "One team" (they type its name, or you ask next).
+
+For "Whole org", send neither `team_name` nor `team_id`. For a team,
+send the name as `team_name`; the save resolves it, and Step 10 handles
+`team_not_found` and `team_store_unavailable`.
+
+Rules for `admin_only`:
 
 - **Default is everyone.** If the admin doesn't care or doesn't answer,
   omit the field (leave it NULL) and say so in the proposal summary.
@@ -616,14 +710,17 @@ guard exists to prevent.
 For from-scratch new workflows (no baseline), render the proposal
 without diff annotations.
 
-Then ask:
+Then ask whether the draft is right, as the last question alongside
+any decisions still open (scope and access on the first pass): "Does
+the rest of the draft look right?", with "Looks right" (go on to the
+final check and the save question) or "Change something" (they say
+what, or you ask next).
 
-> "Does this look right, or would you like to change anything?"
-
-Accept free-form feedback ("make step 2 use Linear not Jira",
-"rename it", "add a step between 3 and 4", "drop the gate on step 4")
-and update the draft. Repeat until the admin is satisfied. Do NOT
-save yet.
+Accept free-form feedback, typed with the answer or in a later message
+("make step 2 use Linear not Jira", "rename it", "add a step between 3
+and 4", "drop the gate on step 4"), and update the draft. If they pick
+"Change something" without saying what, ask what to change in prose.
+Repeat until the admin is satisfied. Do NOT save yet.
 
 ## Step 6: Referential validation
 
@@ -640,6 +737,16 @@ If any reference is unresolvable, surface it clearly:
 > should I resolve it?"
 
 Do NOT call `forge__save_workflow` until every reference resolves.
+
+For every inline `new_skills` entry, also check its `needs`: each id
+must exist in `catalog.state_categories`, and for every capability in
+its `consumes` (and a single-repository detection in its `produces`),
+every category listed for it in `catalog.capability_prerequisites`
+must be in the same skill's `needs`. If anything is missing, update the
+proposal and let the admin review the change before the Step 8 save
+question. If the catalog has no `state_categories` or
+`capability_prerequisites` (an older server), skip this check, keep any
+baseline `needs` as they are, and let the save response report problems.
 
 ## Step 7: Reachability check on `applicable_expression`
 
@@ -659,6 +766,11 @@ workflow, that step will never run. Examples:
   `implement_feature` / `fix_bug`). The step is unreachable.
 - A step gated on `story_count > 1` in a workflow that doesn't run
   `epic_story_breakdown`. Same problem.
+- A step gated on `epic_key != null` whose own skill declares
+  `needs: ["work_item"]`. The gate is evaluated before the step
+  resolves its needs, so on a run without a ticket the step is skipped
+  and never asks for one. Only an EARLIER step can set a key a gate
+  reads.
 
 When you detect an unreachable step, do NOT save. Instead:
 
@@ -860,9 +972,10 @@ Render the warnings inline with the success message, e.g.:
 > `needs_input` but doesn't mention `display_text`. If the skill scans
 > the codebase or produces a structured findings table before asking
 > the auditor for approval, those findings will be lost when a
-> delegated sub-agent only relays the CHECKPOINT back to the parent.
-> Want me to update the skill's instructions to include `display_text`,
-> or is this skill intentionally just a routing prompt?"
+> delegated sub-agent only relays the CHECKPOINT back to the parent."
+
+Then ask the admin to choose "Add `display_text` guidance" or "Leave
+it; it only routes", the way "How to ask the admin" describes.
 
 Do NOT block or re-prompt for save approval on a warning — the
 workflow already committed. The follow-up edit (if the admin chooses
@@ -876,7 +989,7 @@ envelope, explain it plainly and offer to adjust:
 | Error code                | What it means                                  | Offer                                     |
 |---------------------------|------------------------------------------------|-------------------------------------------|
 | `admin_required`          | Caller is not an org admin                     | STOP — not recoverable in this session     |
-| `invalid_request`         | Payload failed schema validation               | Show `field` (and `step_index` if present), fix the value, retry. When `field` is `new_skills.consumes` / `new_skills.produces` the envelope also carries `unknown_capabilities` and `authorable_capabilities` — replace the invented id with one from that list, or drop the declaration |
+| `invalid_request`         | Payload failed schema validation               | Show `field` (and `step_index` if present), fix the value, retry. For `new_skills.needs`: replace each id in `unknown_needs` with one from `available_needs`, and for each `{ capability, requires }` entry in `missing_prerequisites`, add the `requires` category to that skill's `needs`. For `new_skills.consumes` / `new_skills.produces`: replace each id in `unknown_capabilities` with one from `authorable_capabilities`, or drop the declaration. Show the admin any changed reads before retrying. |
 | `team_not_in_org`         | Team scope but the supplied `team_id` does not belong to the caller's org | Pick a team in your own org, or use org scope |
 | `team_not_found`          | `team_name` did not match any team in the org  | Show `available_teams` and ask which to use |
 | `team_store_unavailable`  | `team_name` used but team store is not wired   | Ask the admin to pass `team_id` directly  |
@@ -932,7 +1045,8 @@ org or teams"), stop and say so — nothing to delete.
 
 If the target is team-scoped, confirm which team. If the admin named
 the team directly, match against `caller.teams` by name. If the name
-is ambiguous or missing, ask them to pick from the team list.
+is ambiguous or missing, ask them to pick from `caller.teams`, the same
+way the Step 4 scope question lists teams.
 
 Prefer `team_name` over `team_id` when invoking the MCP tool — the
 server resolves the name for you (team names are unique within an

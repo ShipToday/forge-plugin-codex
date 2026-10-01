@@ -400,6 +400,11 @@ function cleanupStale() {
  * hook event; a falsy value yields the cwd-only fallback file.
  *
  * @param {string|undefined} sessionId — Claude Code session id
+ * @param {{ waitOutStaleLock?: boolean }} [options] — `waitOutStaleLock`: a
+ *   write waits until a lock another hook holds is released or can be
+ *   reclaimed, instead of giving up after the short wait. For a hook whose
+ *   writes must not be dropped; hooks that block a prompt or a tool call keep
+ *   the short wait.
  * @returns {{ read: Function, write: Function, increment: Function, stateFilePath: string }}
  */
 // Codex: atomic replace. The temp file is owner-private (0600 where honoured)
@@ -416,11 +421,16 @@ function writeFileAtomic(fp, contents) {
   }
 }
 
-function forSession(sessionId) {
+function forSession(sessionId, { waitOutStaleLock = false } = {}) {
   const fp = statePath(sessionId);
+  // A lock can outlive the short wait without being stale — a parallel hook
+  // that is slow to write, or a lock whose removal failed — and until it is
+  // reclaimed every writer that gives up loses its update. Waiting past the
+  // 5 s stale threshold means the writer either gets the lock or reclaims it.
+  const lockWaitMs = waitOutStaleLock ? 6000 : 750;
 
   function withLock(action) {
-    const lock = `${fp}.lock`; const deadline = Date.now() + 750;
+    const lock = `${fp}.lock`; const deadline = Date.now() + lockWaitMs;
     while (true) {
       try { fs.mkdirSync(lock); break; } catch (error) {
         if (error?.code !== 'EEXIST') throw error;

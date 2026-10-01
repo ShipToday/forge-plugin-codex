@@ -572,7 +572,7 @@ not match the recommended tier.
 The response metadata contains a line like:
 
 ```
-**Model Routing**: tier=balanced | model=gpt-6-sol | environment=codex | guidance=codex_model_map | complexity=medium | task=planning
+**Model Routing**: tier=balanced | model=gpt-6.1-sol | environment=codex | guidance=codex_model_map | complexity=medium | task=planning
 ```
 
 The `tier` value tells you which capability tier to use. The optional `model`
