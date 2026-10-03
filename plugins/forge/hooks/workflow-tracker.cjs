@@ -943,7 +943,7 @@ function extractSkillContext(call) {
 function holdAfterUnreadWrappedUpdate(event) {
   const name = wrappedForgeCall(event);
   if (!name || !name.includes(WORKFLOW_STATE_PATTERN)) return;
-  const sessionState = sessionStateModule.forSession(event.session_id);
+  const sessionState = sessionStateModule.forSession(event.session_id, { waitOutStaleLock: true });
   if (sessionState.read().active_workflow) sessionState.write({ step_resync_required: true });
 }
 
@@ -978,7 +978,13 @@ async function main() {
 
   // Scope state to this Claude Code session so concurrent sessions in the
   // same directory each track their own workflow.
-  const sessionState = sessionStateModule.forSession(event.session_id);
+  //
+  // This hook records what the server's replies say — the step's permissions
+  // and lock, a completed run — so a write waits out another hook's lock
+  // rather than give up. A dropped write is silent (main() swallows errors):
+  // a lost completion left a finished run holding its write lock and "active"
+  // until the next re-sync.
+  const sessionState = sessionStateModule.forSession(event.session_id, { waitOutStaleLock: true });
 
   const toolName = event.tool_name || '';
   const toolResponse = event.tool_response || '';
