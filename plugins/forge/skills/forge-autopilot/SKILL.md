@@ -176,7 +176,9 @@ returns the enabled workflow catalog for this user and organization.
   re-ask. If they pick "Build a custom workflow", take the authoring offer in
   Forge's instructions directly, carrying their words forward.
 - Never invent a workflow, expose a server-side skill id as an option, or set
-  `classification_complete: true` without an explicit `workflow`.
+  `classification_complete: true` without an explicit `workflow` — except when
+  sending an `approach` Forge asked you to work out; that call never names a
+  workflow.
 
 The server-provided workflow catalog is the source of truth; the client AI
 owns the contextual choice among those available workflows.
@@ -197,6 +199,9 @@ conversation and current phase**:
   workflow fits.
 - Never set `start_confirmed: true` without the server-issued
   `admission_token` from the immediately preceding proposal.
+- When the proposal is an approach Forge worked out for the request ("How
+  Forge will approach this"), show it to the person and ask them; never
+  confirm it yourself.
 
 ### Exception 1 — Help / recommendation request
 

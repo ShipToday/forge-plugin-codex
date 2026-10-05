@@ -98,8 +98,9 @@ response shape:
                   "required_capabilities", "skill_relevance_hint",
                   "write_effect": { "writes", "categories", "targets", "self_gated" } }, ...],
   "workflows": [{ "id", "name", "description", "scope" }, ...],
+  "sdlc_stages": [{ "id", "label", "description", "sort_order", "color" }, ...],
   "caller":    {
-    "orgRole", "orgId", "userId", "tier",
+    "orgRole", "orgId", "userId",
     "teams": [{ "id", "name", "description" }, ...]
   },
   "state_categories": [{ "id", "label", "description" }, ...],
@@ -110,9 +111,21 @@ response shape:
     "workflow_preset": [ /* manifest entries — see Step 4 */ ],
     "preset_step":     [ /* manifest entries — see Step 4 */ ],
     "new_skill":       [ /* manifest entries — see Step 4 */ ]
-  }
+  },
+  "tailoring_rules":  { "version", "path", "rules": [{ "id", "rule" }], "limits" },
+  "practice_profile": { "status", "profile", "skills_inventory" }  /* admins only */
 }
 ```
+
+**How the org works.** Follow every rule in `tailoring_rules` whenever you
+draft or change a workflow — they come from the server, so they can change
+without an update to this skill. When `practice_profile.status` is `ok`,
+start from it: your first question or proposal cites at least one of its
+facts. Require a skill from its `skills_inventory` on a step only when that
+skill's `coverage` is `every`; name one found in fewer repositories as "use
+when present". When you save, pass what you learned about how the team does
+the work as `practice_facts` beside `workflow` — `[{ activity, fact,
+evidence: [...] }]`. A fact without evidence is dropped.
 
 Each skill row carries the **authoring metadata** (everything beyond
 `id/name/description/scope`). When you propose a step that references
