@@ -183,6 +183,36 @@ returns the enabled workflow catalog for this user and organization.
 The server-provided workflow catalog is the source of truth; the client AI
 owns the contextual choice among those available workflows.
 
+### When the catalog is paged, shortened or incomplete
+
+Forge keeps a routing reply small enough for the host to show it whole, so a
+large catalog can arrive in pieces. Every catalog opens with a `**Catalog**` line
+— how many workflows it holds, whether all of them are listed or which page
+this is, and a version — and closes with an end line.
+
+- **Pages.** When the line says `page 1 of N`, the reply lists that page only.
+  Route to a workflow on it when it clearly delivers what was asked. Before
+  deciding that nothing fits, or choosing between candidates, read the rest:
+  re-call `forge__start_workflow` with the same arguments plus
+  `catalog_page: 2`, then each page after it. If a page reports a different
+  version, the catalog changed while you were reading: start again at page 1.
+- **Shortened entries.** An entry ending in "…" was trimmed to fit. Before
+  choosing between workflows that look close, or ruling one out on a trimmed
+  entry, re-call with the same arguments plus `catalog_details: [<ids>]` (up
+  to 8) for their full routing hints. Hints come back whole; when they are
+  too long for one reply the answer says which page it is, and you read on
+  with the same `catalog_details` plus `catalog_page`.
+- **A reply that did not arrive whole.** If you see fewer workflows than the
+  `**Catalog**` line states, no end line, or any part of the reply was cut off
+  or replaced by a notice (a truncation marker, a "saved to a file" pointer),
+  the catalog you hold is incomplete. Do not tell the user no workflow exists,
+  do not work out an approach and do not offer to build a workflow from it:
+  re-call with the same arguments plus `catalog_page: 1` and read every page
+  first.
+
+Neither argument starts anything. Both list only workflows this user can
+route to, so a workflow missing from every page is not available here.
+
 ### Admission proposal — validate before activation
 
 A post-classification call returns a server-resolved **workflow proposal**
