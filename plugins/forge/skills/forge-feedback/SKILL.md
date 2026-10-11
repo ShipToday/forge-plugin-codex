@@ -35,6 +35,42 @@ until the user has seen the exact payload and explicitly confirmed.
 - **Nothing is sent without explicit confirmation.** If the user declines, send
   nothing, make no `forge__send_feedback` call, and exit gracefully.
 
+## Question delivery
+
+### Codex question lifetime
+
+For fixed choices, prefer supported, permitted native UI. Forge may use a
+negotiated MCP form; after an answered RE-ENTRY, never ask the question again.
+Otherwise use `request_user_input` or `request_user_input_async` only when
+callable and permitted for this question's purpose in the current mode.
+Prefer a compatible blocking control. A permitted async picker may be used
+once; its string options carry exact labels, so show descriptions and full
+approval material in prose before opening it. Respect each tool's actual
+schema: blocking input accepts 2–3 options; that limit does not apply to every
+native control. Do not remove choices to make them fit.
+
+An acknowledgment such as `accepted:true` records submitted delivery only,
+with no answer. Retain the pending question ID, step token and option keys;
+wait for the actual user selection or explicit typed reply before dependent
+work. The async picker can close at turn end or timeout: show the same
+numbered recovery choices before ending the turn unless the user has already
+answered. Never re-open it automatically, force Plan mode, probe forbidden
+tools, or keep it alive with sleeps or polling. A resolved UI event can be
+cleanup, not an answer. Do not bypass host policy rejection through another
+tool. When native input is unavailable or prohibited, use persistent numbered
+choices. Other hosts keep their permitted native controls and existing wait
+protocol.
+
+### Feedback confirmation
+
+Use a compatible, permitted native control: blocking `request_user_input`, or
+`request_user_input_async` when that is the one permitted. Keep the full
+sanitized payload in prose before the picker. Question delivery does not
+authorize sending: only an explicit **Send it** answer for that exact payload
+does. A revised payload requires a new confirmation. If native input is
+unavailable or prohibited, show the same choices as a numbered list and wait
+for an explicit reply.
+
 ## Step 1 — Collect the feedback
 
 Ask the user what feedback they'd like to share with the ShipToday team. Keep it
@@ -73,10 +109,8 @@ Session context (sanitized):
 
 ## Step 4 — Let the user revise, then confirm
 
-Ask the user to confirm, revise, or cancel. Use blocking `request_user_input`
-when it is callable; never use `request_user_input_async`, whose picker can close
-before the user answers. Otherwise show the options as a numbered list and wait
-for the reply. Offer options like **Send it**, **Edit first**, and **Don't send**:
+Ask the user to confirm, revise, or cancel. Follow Question delivery above,
+with options like **Send it**, **Edit first**, and **Don't send**:
 
 - **Edit first** → apply their changes and re-render the payload (back to Step 3).
 - **Don't send** / cancel / no response → **send nothing**, do not call

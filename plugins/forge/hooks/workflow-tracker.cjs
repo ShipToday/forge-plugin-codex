@@ -1052,7 +1052,9 @@ async function main() {
   // proves nothing about it. Codex: a failed call (the question UI closed or
   // errored) is no proof the question reached the user.
   if (QUESTION_TOOL_RE.test(toolName)) {
-    if (toolFailed) return;
+    // Async submission can return accepted:true before anybody answers.
+    // It is not evidence for answerWithoutAsking; the later user turn is.
+    if (/request_user_input_async$/.test(toolName) || toolFailed) return;
     const state = sessionState.read();
     if (state.active_workflow && state.pending_checkpoint) {
       sessionState.write({ pending_checkpoint_asked_at: new Date().toISOString() });

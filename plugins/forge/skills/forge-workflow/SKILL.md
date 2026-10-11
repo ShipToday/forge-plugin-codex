@@ -57,16 +57,50 @@ in sync.
 
 ## How to ask the admin
 
-Any question with a fixed set of answers goes through blocking
-`request_user_input` when it is callable; never use
-`request_user_input_async`, whose picker can close before the admin
-answers. That covers scope, who can run the workflow, a yes/no, a pick
-from the catalog, and whether the draft is right. One call carries up
-to three questions of two or three options each, and the admin can
-type anything else, so put the decisions a step needs into one call
-instead of asking them one by one. Make it the only tool call in that
-response, and wait for the answer. Otherwise list the choices as
-numbered text in one message and wait for the answer.
+### Codex question lifetime
+
+For fixed choices, prefer supported, permitted native UI. Forge may use a
+negotiated MCP form; after an answered RE-ENTRY, never ask the question again.
+Otherwise use `request_user_input` or `request_user_input_async` only when
+callable and permitted for this question's purpose in the current mode.
+Prefer a compatible blocking control. A permitted async picker may be used
+once; its string options carry exact labels, so show descriptions and full
+approval material in prose before opening it. Respect each tool's actual
+schema: blocking input accepts 2–3 options; that limit does not apply to every
+native control. Do not remove choices to make them fit.
+
+An acknowledgment such as `accepted:true` records submitted delivery only,
+with no answer. Retain the pending question ID, step token and option keys;
+wait for the actual user selection or explicit typed reply before dependent
+work. The async picker can close at turn end or timeout: show the same
+numbered recovery choices before ending the turn unless the user has already
+answered. Never re-open it automatically, force Plan mode, probe forbidden
+tools, or keep it alive with sleeps or polling. A resolved UI event can be
+cleanup, not an answer. Do not bypass host policy rejection through another
+tool. When native input is unavailable or prohibited, use persistent numbered
+choices. Other hosts keep their permitted native controls and existing wait
+protocol.
+
+### Asking the admin's decisions
+
+Any question with a fixed set of answers goes through a compatible,
+permitted native question tool under the contract above. That covers
+scope, who can run the workflow, a yes/no, a pick from the catalog, and
+whether the draft is right. Blocking `request_user_input` carries up to
+three questions of two or three options each, and the admin can type
+anything else, so put the decisions a step needs into one call instead
+of asking them one by one. Async input takes
+`{questions:[{title,options:[<label strings>]}]}`: its options are
+labels only, so present their descriptions in prose first, and preserve
+every alternative. Make the question the only tool call in that
+response, and wait for the answer. When no compatible permitted tool is
+callable, list the choices as numbered text in one message and wait for
+the answer.
+
+Show the complete save or delete proposal before the picker, and perform
+that write only after explicit confirmation of the displayed proposal. An
+acknowledgment or preselected default never authorizes saving or
+deleting. Changes to the proposal require confirmation again.
 
 Keep prose for questions with no fixed answers: the Step 2 intake
 ("describe it in your own words"), or asking what to change after the
@@ -314,10 +348,9 @@ exists. The admin's intent is ambiguous:
   system if no org preset — for a team override).
 
 Ask the admin to choose between "Modify existing" and "Replace from
-scratch". If blocking `request_user_input` is callable, use it as the
-only tool call in that response; never use `request_user_input_async`,
-whose picker can close before the admin answers. Otherwise list the
-choices as numbered text and wait for the answer.
+scratch". Follow How to ask the admin: a compatible, permitted question
+tool as the only tool call in that response, otherwise the choices as
+numbered text. Wait for the answer.
 
 Handle the answer:
 
@@ -530,9 +563,9 @@ than letting the admin discover it on the dashboard.
 
 Scope (the whole org, or one team) and `admin_only` are access control,
 not labels. **Ask** both; don't infer either. Ask them together — in
-the same `request_user_input` call when it is callable, otherwise as
-numbered choices in one message — along with the draft check from
-Step 5 when the proposal is ready:
+one question call when a compatible, permitted tool is callable (see
+How to ask the admin), otherwise as numbered choices in one message —
+along with the draft check from Step 5 when the proposal is ready:
 
 - **Scope** — "Where should this workflow live?": "Whole org" (every
   team can run it), or a team by name (only that team can run it).
@@ -541,12 +574,13 @@ Step 5 when the proposal is ready:
   (hidden from members; you can open it up later from the Workflows
   page).
 
-Take the team options from `caller.teams`. A `request_user_input`
-question takes two or three options, so list "Whole org" plus the one
-or two teams that fit the intent best, and let a typed answer cover the
-rest: match a typed team name against `caller.teams`, and ask again if
-it matches none. When the admin already named the scope, drop that
-question and ask only the rest.
+Take the team options from `caller.teams`. A blocking
+`request_user_input` question takes two or three options, so list
+"Whole org" plus the one or two teams that fit the intent best, and let
+a typed answer cover the rest: match a typed team name against
+`caller.teams`, and ask again if it matches none. A control without
+that limit lists every team. When the admin already named the scope,
+drop that question and ask only the rest.
 
 When `caller.teams` is empty or missing, still ask; don't assume the
 workflow is org-wide. An empty list can mean the org has no teams, but
@@ -818,11 +852,9 @@ way?"
 
 Ask the admin to choose between "Switch to AI decides (Recommended)" — it
 asks before a write that would normally need approval — and "Keep Never
-asks" — it writes to <targets> without asking. If blocking
-`request_user_input` is callable, use it as the only tool call in that
-response; never use `request_user_input_async`, whose picker can close
-before the admin answers. Otherwise list the choices as numbered text and
-wait for the answer.
+asks" — it writes to <targets> without asking. Follow How to ask the
+admin: a compatible, permitted question tool as the only tool call in that
+response, otherwise the choices as numbered text. Wait for the answer.
 
 - **Switch to AI decides** — set that step's `confirmation_policy` to
   `ai_judgment` and include the change in the Step 8 plan.
@@ -871,11 +903,11 @@ behind, so the warning above would be false. Say this instead:
 > edit it."
 
 Say it once, plainly, and do not repeat it after they answer. Then ask the
-admin to choose "Save", "Keep editing", or "Cancel". If blocking
-`request_user_input` is callable, use it as the only tool call in that
-response; never use `request_user_input_async`, whose picker can close
-before the admin answers. Otherwise list the choices as numbered text and
-wait for the answer.
+admin to choose "Save", "Keep editing", or "Cancel". Follow How to ask the
+admin: show the full plan first, then a compatible, permitted question
+tool as the only tool call in that response, otherwise the choices as
+numbered text. Wait for the answer; only an explicit "Save" for the plan
+shown authorizes saving.
 
 Handle the answer:
 
@@ -1098,11 +1130,11 @@ If the target is team-scoped AND the org has no preset of its own (no
 wording instead — the team falls through to the system default and the
 workflow stops running for that team.
 
-Ask the admin to choose "Remove override" or "Cancel". If blocking
-`request_user_input` is callable, use it as the only tool call in that
-response; never use `request_user_input_async`, whose picker can close
-before the admin answers. Otherwise list the choices as numbered text and
-wait for the answer.
+Ask the admin to choose "Remove override" or "Cancel". Follow How to ask
+the admin: show what will be removed first, then a compatible, permitted
+question tool as the only tool call in that response, otherwise the
+choices as numbered text. Wait for the answer; only an explicit "Remove
+override" authorizes the delete.
 
 Handle the answer:
 
