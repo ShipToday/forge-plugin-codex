@@ -288,10 +288,11 @@ function freshState(sessionId) {
     pending_checkpoint_question_id: null,
     pending_checkpoint_response_field: null,
     // Approval authenticity — evidence the pinned question reached a
-    // person: the host's question tool was called after the pin
+    // person: a blocking host question tool succeeded after the pin
     // (`pending_checkpoint_asked_at`, recorded by workflow-tracker), or a user
     // prompt arrived after it (`pending_checkpoint_user_turn_at`, recorded by
-    // prompt-router — the numbered-reply fallback). workflow-guard refuses an
+    // prompt-router — a numbered reply or a later async selection). An async
+    // submission acknowledgment is never evidence here. workflow-guard refuses an
     // answer posted with neither: a relayed question is the user's to answer,
     // and a write plan "approved" by the model would be recorded as approved
     // by the user. Both reset when a different question is pinned.
