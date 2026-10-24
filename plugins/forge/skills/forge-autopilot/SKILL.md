@@ -101,6 +101,11 @@ For fixed choices, prefer supported, permitted native UI. Forge may use a
 negotiated MCP form; after an answered RE-ENTRY, never ask the question again.
 Otherwise use `request_user_input` or `request_user_input_async` only when
 callable and permitted for this question's purpose in the current mode.
+Assess MCP forms and each host tool independently. In Default mode, a
+Plan-only blocking tool does not prohibit the async tool: check its own
+permissions before numbered text. An unexplained MCP rejection is not a
+policy-wide denial. Explicit policy prohibiting the question across routes
+still applies.
 Prefer a compatible blocking control. A permitted async picker may be used
 once; its string options carry exact labels, so show descriptions and full
 approval material in prose before opening it. Respect each tool's actual
@@ -456,17 +461,27 @@ your job, the same as for shell. Categories are coarse:
 | `web` | web fetch and web search tools |
 | `tracker_read` | `list_issues`, `get_issue`, `list_comments`, `search_threads`, … |
 | `tracker_write` | `save_issue`, `create_issue`, `save_comment`, `update_issue`, … |
-| `docs_read` / `docs_write` | Notion, Confluence, Google Drive and Linear documents — read / write |
+| `docs_read` | Read connected documents; this category grants no writes |
+| `docs_write` | Create or update connected documents. When the active step explicitly routes an approved document into the repository, use `apply_patch` or an editor write to create or update that ONE canonical routed document only |
 | `messaging` | Slack send |
 | `calendar` / `design` / `meetings` | Per-connector groups |
 | `conversation_artifact` | task-owned `.html`/`.svg` backing file for an inline renderer; never a repository file |
-| `code_edit` | code-editing tools such as `apply_patch` or editor writes |
+| `code_edit` | code-editing tools such as `apply_patch` or editor writes, for application code and other repository edits beyond the narrow `docs_write` document scope |
 | `shell` | Commands that change or publish things (builds, tests, commits, pushes, PRs), plus the code-host connector writes (`create_pull_request`, `merge_pull_request`, `push_files`, …) |
 
 Concretely: a readiness check does not include `code_edit` or `shell`, so do
 not edit during it. A code-execution step includes both. A triage step that
 only reads the ticket includes `tracker_read` but not `tracker_write` — read
 the ticket's comments, but do not post to or rewrite the ticket.
+
+A `docs_write` step without `code_edit` can save only the document the step
+explicitly routed and approved, at its resolved canonical location. Read nearby
+documents to follow the existing layout, then create or update that document;
+do not edit application source or configuration. This permission adds no shell
+or git rights: do not stage, commit, push, or change a pull request to deliver
+the document. A tracker pointer also requires `tracker_write` and its own
+declared write scope. Content approval and any required repository-destination
+choice still come before writing; a detected layout alone grants nothing.
 
 **Shell is not checked by the hook.** Shell commands always pass — a pending
 question and the write lock never look at a command. Following the step's

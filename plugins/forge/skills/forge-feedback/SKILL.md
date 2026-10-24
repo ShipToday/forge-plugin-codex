@@ -43,6 +43,11 @@ For fixed choices, prefer supported, permitted native UI. Forge may use a
 negotiated MCP form; after an answered RE-ENTRY, never ask the question again.
 Otherwise use `request_user_input` or `request_user_input_async` only when
 callable and permitted for this question's purpose in the current mode.
+Assess MCP forms and each host tool independently. In Default mode, a
+Plan-only blocking tool does not prohibit the async tool: check its own
+permissions before numbered text. An unexplained MCP rejection is not a
+policy-wide denial. Explicit policy prohibiting the question across routes
+still applies.
 Prefer a compatible blocking control. A permitted async picker may be used
 once; its string options carry exact labels, so show descriptions and full
 approval material in prose before opening it. Respect each tool's actual
