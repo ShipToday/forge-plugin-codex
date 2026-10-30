@@ -207,10 +207,11 @@ function heldRunGone(state, toolResponse, toolInput) {
 }
 
 // Release a run that is over, exactly as the completion branch in main()
-// does, together with its recovery hold.
-function releaseRun(sessionState) {
+// does, together with its recovery hold. A run this session parked behind it
+// comes back to the front (see endRun in session-state.cjs).
+function releaseRun(sessionState, conversationId = null) {
   const state = sessionState.read();
-  sessionState.write({
+  endHeldRun(sessionState, conversationId, {
     last_checkpoint_turn: state.turn_count || 0,
     active_workflow: false,
     observer_blocked: true,
@@ -232,6 +233,19 @@ function releaseRun(sessionState) {
     current_step_token: null,
     last_checkpoint_at: new Date().toISOString(),
   });
+}
+
+function endHeldRun(sessionState, conversationId, release) {
+  sessionState.update((state) => sessionStateModule.endRun(state, conversationId, release));
+}
+
+// An update or recovery read for a run this session parked brings it to the
+// front first, so it is checked and recorded against its own step and lock.
+function frontRunFor(sessionState, toolInput) {
+  if (typeof toolInput === 'string') { try { toolInput = JSON.parse(toolInput); } catch { return; } }
+  const requested = toolInput?.conversation_id;
+  if (!sessionStateModule.isParked(sessionState.read(), requested)) return;
+  sessionState.update((state) => sessionStateModule.bringRunToFront(state, requested));
 }
 
 // get_workflow_state names the step by its composite id (`skill__N`); the rest
@@ -264,9 +278,10 @@ function startHeader(response) {
 }
 
 function resyncFromStateRead(sessionState, toolResponse, toolInput) {
+  frontRunFor(sessionState, toolInput);
   const state = sessionState.read();
   if (heldRunGone(state, toolResponse, toolInput)) {
-    releaseRun(sessionState);
+    releaseRun(sessionState, state.conversation_id);
     return;
   }
   if (toolResponse?.isError || toolResponse?.is_error) return;
@@ -298,7 +313,7 @@ function resyncFromStateRead(sessionState, toolResponse, toolInput) {
   // step that no longer exists. Release the run exactly as the completion
   // branch in main() would have.
   if (RUN_ENDED_LINE.test(statusLine)) {
-    releaseRun(sessionState);
+    releaseRun(sessionState, conversation[1]);
     return;
   }
 
@@ -1036,7 +1051,7 @@ async function main() {
   // Codex: a failed read said nothing, so it re-syncs nothing.
   if (toolName.includes(WORKFLOW_STATE_READ_PATTERN)) {
     if (!wrapped && heldRunGone(sessionState.read(), toolResponse, event.tool_input)) {
-      releaseRun(sessionState);
+      releaseRun(sessionState, sessionState.read().conversation_id);
       return;
     }
     if (toolFailed) return;
@@ -1070,7 +1085,7 @@ async function main() {
   if (!isWorkflowStart && !isStateUpdate && !isAbandon) return; // Not a Forge tool — exit silently
 
   if (isAbandon && !wrapped && heldRunGone(sessionState.read(), toolResponse, event.tool_input)) {
-    releaseRun(sessionState);
+    releaseRun(sessionState, sessionState.read().conversation_id);
     return;
   }
 
@@ -1100,7 +1115,9 @@ async function main() {
   // semantics — so the UserPromptSubmit hook stops emitting "workflow active"
   // reminders on the next turn.
   if (isAbandon && isWorkflowAbandoned(toolResponse)) {
-    sessionState.write({
+    let abandonInput = event.tool_input;
+    if (typeof abandonInput === 'string') { try { abandonInput = JSON.parse(abandonInput); } catch { abandonInput = {}; } }
+    endHeldRun(sessionState, abandonInput?.conversation_id || null, {
       // Codex: the turn-cadence baseline moves with the time baseline below.
       last_checkpoint_turn: sessionState.read().turn_count || 0,
       active_workflow: false,
@@ -1167,7 +1184,9 @@ async function main() {
       if (delivery) updates.observation_delivery = { ...delivery,
         processed_at: new Date().toISOString(), disposition: 'observe' };
     }
-    sessionState.write(updates);
+    // A run already in front is parked, not overwritten: it comes back when
+    // this one ends, or when it is updated again.
+    sessionState.update((state) => ({ ...updates, parked_runs: sessionStateModule.parkFrontRun(state, conversationId) }));
     return;
   }
 
@@ -1231,6 +1250,7 @@ async function main() {
     }
     let callInput = event.tool_input;
     if (typeof callInput === 'string') { try { callInput = JSON.parse(callInput); } catch { return; } }
+    frontRunFor(sessionState, callInput);
     const tracked = sessionState.read();
     if (tracked.active_workflow && callInput?.conversation_id && callInput.conversation_id !== tracked.conversation_id) return;
     // A failed call never advances local state. Only the server's own `Error:`
@@ -1468,7 +1488,7 @@ async function main() {
   // A new request after completion is the model's to judge (the
   // forge-autopilot trigger rule); nothing here or in prompt-router gates it.
   if (isStateUpdate && header.complete) {
-    sessionState.write({
+    endHeldRun(sessionState, sessionState.read().conversation_id, {
       // Codex: the turn-cadence baseline moves with the time baseline below.
       last_checkpoint_turn: sessionState.read().turn_count || 0,
       active_workflow: false,

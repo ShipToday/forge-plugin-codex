@@ -16,7 +16,7 @@
  * directory behavior.
  *
  * Usage: `require('./session-state.cjs').forSession(event.session_id)`
- * returns a `{ read, write, increment, stateFilePath }` instance bound to
+ * returns a `{ read, write, increment, update, stateFilePath }` instance bound to
  * that session's file.
  *
  * State files live in {os.tmpdir()}/forge-observer/{key}.json and
@@ -352,7 +352,94 @@ function freshState(sessionId) {
     // Field name shared verbatim with the Cursor stop-observer.cjs
     // (parity) — do NOT rename without coordinating both halves.
     forge_observation_enabled: null,
+    // Runs this session holds behind the one in front, oldest first: each a
+    // snapshot of RUN_FIELDS. See parkFrontRun.
+    parked_runs: [],
   };
+}
+
+// ── Runs held per conversation ──────────────────────────────────────────
+// The top-level run fields describe the run in front: the one the guard
+// checks. A workflow started while another is mid-step parks the run it
+// interrupts, with its own question pin, step and write lock; ending the run
+// in front brings back the one parked last, and an update to a parked run
+// brings that run to the front. Holding one run per session made a finished
+// nested run release the session, and the run it interrupted was then refused
+// as untracked until it was recovered.
+const RUN_FIELDS = Object.freeze([
+  'active_workflow',
+  'conversation_id',
+  'current_skill',
+  'pending_checkpoint',
+  'pending_checkpoint_step',
+  'pending_checkpoint_at',
+  'pending_checkpoint_question_id',
+  'pending_checkpoint_response_field',
+  'pending_checkpoint_asked_at',
+  'pending_checkpoint_user_turn_at',
+  'current_step_tools',
+  'current_step_skill',
+  'write_lock',
+  'step_resync_required',
+  'step_active_since',
+  'workflow_recovery_required',
+  'workflow_expiry',
+  'workflow_activity_at',
+  'current_step_token',
+]);
+const MAX_PARKED_RUNS = 5;
+
+function parkedRuns(state) {
+  return Array.isArray(state?.parked_runs)
+    ? state.parked_runs.filter((run) => run && typeof run.conversation_id === 'string' && run.conversation_id)
+    : [];
+}
+
+function isParked(state, conversationId) {
+  return typeof conversationId === 'string' && parkedRuns(state).some((run) => run.conversation_id === conversationId);
+}
+
+// The parked list with the run in front added, ready for another run to take
+// its place. Nothing is parked when no run is in front or it is `incoming`.
+function parkFrontRun(state, incoming = null) {
+  const parked = parkedRuns(state).filter((run) => run.conversation_id !== incoming);
+  if (!state.active_workflow || !state.conversation_id || state.conversation_id === incoming) return parked;
+  const front = {};
+  for (const key of RUN_FIELDS) front[key] = state[key] ?? null;
+  return [...parked.filter((run) => run.conversation_id !== state.conversation_id), front].slice(-MAX_PARKED_RUNS);
+}
+
+// Updates that bring a parked run to the front, or null when it is not parked.
+function bringRunToFront(state, conversationId) {
+  if (!isParked(state, conversationId) || state.conversation_id === conversationId) return null;
+  const target = parkedRuns(state).find((run) => run.conversation_id === conversationId);
+  return { ...target, parked_runs: parkFrontRun(state, conversationId) };
+}
+
+// A user's prompt is their turn on every question still open, parked or not:
+// prompt-router stamps it on the run in front, and this carries it to each
+// parked run with a pinned question, so an answer posted after switching back
+// is not refused for evidence recorded against the other run. A question-tool
+// call stays evidence for the run in front only — it cannot say which run's
+// question it asked.
+function stampParkedUserTurn(state, at) {
+  const parked = parkedRuns(state);
+  if (!parked.some((run) => run.pending_checkpoint)) return null;
+  return {
+    parked_runs: parked.map((run) => (run.pending_checkpoint ? { ...run, pending_checkpoint_user_turn_at: at } : run)),
+  };
+}
+
+// Updates that end a run: `release` clears the run in front and the run parked
+// last takes its place. A parked run that ends is only dropped from the list.
+function endRun(state, conversationId, release) {
+  const parked = parkedRuns(state);
+  if (conversationId && conversationId !== state.conversation_id && isParked(state, conversationId)) {
+    return { parked_runs: parked.filter((run) => run.conversation_id !== conversationId) };
+  }
+  const next = parked.at(-1);
+  if (!next) return { ...release, parked_runs: [] };
+  return { ...release, ...next, parked_runs: parked.slice(0, -1) };
 }
 
 /** Remove stale session files and recovery records without letting one bad file
@@ -406,7 +493,7 @@ function cleanupStale() {
  *   reclaimed, instead of giving up after the short wait. For a hook whose
  *   writes must not be dropped; hooks that block a prompt or a tool call keep
  *   the short wait.
- * @returns {{ read: Function, write: Function, increment: Function, stateFilePath: string }}
+ * @returns {{ read: Function, write: Function, increment: Function, update: Function, stateFilePath: string }}
  */
 // Codex: atomic replace. The temp file is owner-private (0600 where honoured)
 // and renamed over the target, so a reader never sees a torn write. Exported
@@ -518,7 +605,24 @@ function forSession(sessionId, { waitOutStaleLock = false } = {}) {
     return withLock(() => { const state = readForWrite(); state[field] = (state[field] || 0) + 1; writeRaw(state); return state; });
   }
 
-  return { read, write, increment, stateFilePath: fp };
+  /**
+   * Read, change and persist under one lock.
+   * @param {(state: Object) => Object|null} change — returns fields to merge
+   *   (shallow), or null to leave the state as it is
+   * @returns {Object} the state after the change
+   */
+  function update(change) {
+    return withLock(() => {
+      const state = readForWrite();
+      const updates = change(state);
+      if (!updates) return state;
+      Object.assign(state, updates);
+      writeRaw(state);
+      return state;
+    });
+  }
+
+  return { read, write, increment, update, stateFilePath: fp };
 }
 
-module.exports = { forSession, writeFileAtomic };
+module.exports = { forSession, writeFileAtomic, parkFrontRun, bringRunToFront, endRun, isParked, stampParkedUserTurn };

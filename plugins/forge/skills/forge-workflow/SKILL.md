@@ -37,9 +37,10 @@ Forge is an MCP server; the tools you will call are:
   (and any new custom skills) to the Forge catalog.
 - `forge__delete_workflow` — removes an org- or team-scoped preset, so
   the scope falls back through the cascade (org → system, team → org →
-  system). Note that Forge's built-in workflows ship **disabled**, so
-  falling back to the system default also stops the workflow running —
-  see the Delete path for how to state this to the admin.
+  system). Most of Forge's built-in workflows ship **disabled**, so
+  falling back to the system default usually stops the workflow running;
+  the launch set ships on and keeps running — see the Delete path for
+  how to state this to the admin.
 
 ## Why this skill is schema-driven
 
@@ -327,11 +328,15 @@ The cascade is automatic:
   system default in cascade order.
 
 Read the response's `scope` field to know which scope actually
-matched (`system` | `org` | `team`) and the `steps_fallback_to_system`
-flag to detect the broken-override case. Skill metadata is included
-on each step (`skill_name`, `skill_description`,
-`skill_default_confirmation`, `skill_suggested_expression`) so you
-can render a readable baseline without a second skill lookup.
+matched (`system` | `org` | `team`). `steps_fallback_to_system: true`
+means the row at that scope changes no steps: it only switches the
+workflow on or off, sets who can see it, or renames it, and every step
+follows the default. That is a normal state, not a broken override.
+
+Skill metadata is included on each step (`skill_name`,
+`skill_description`, `skill_default_confirmation`,
+`skill_suggested_expression`) so you can render a readable baseline
+without a second skill lookup.
 
 If `forge__get_workflow` is not available in your environment, stop
 and ask the admin to enumerate the existing steps before drafting.
@@ -341,8 +346,9 @@ Do NOT infer steps from the workflow's description.
 
 When `forge__get_workflow` reports `scope` equal to the **target
 scope** of the new save (i.e., `org` for an org override, or `team`
-for a team override on the requested team), an override already
-exists. The admin's intent is ambiguous:
+for a team override on the requested team) and
+`steps_fallback_to_system: false`, an override already exists. The
+admin's intent is ambiguous:
 
 - **Modify** the existing override (most common). Baseline = the
   existing override's steps. `forge__save_workflow` will overwrite
@@ -373,6 +379,13 @@ If no override yet exists at the target scope (`scope` returned was a
 broader scope than the target), there is nothing to ask — the
 returned baseline is already the correct starting point and you
 proceed straight to Step 4.
+
+The same goes when `scope` equals the target scope but
+`steps_fallback_to_system` is `true`. That row changes no steps: it is
+what switching the workflow on, renaming it, restricting who sees it,
+or Reset to default leaves behind. There is no step override to modify
+or replace, so do not ask, and do not offer `forge__delete_workflow`:
+deleting the row undoes those settings and can switch the workflow off.
 
 Note which way the update path runs in each case. An override that
 already exists at the target scope is ALREADY off the catalog's update
@@ -716,32 +729,13 @@ one; if the admin's phrasing omits it, add it before saving. (The server
 normalizes a missing prefix on save, but authoring it in keeps the
 approval preview accurate.)
 
-### Session Feedback must close every workflow
+### No closing feedback step is required
 
-Every workflow you author MUST end with a **`session_feedback`** step — the
-standard end-of-session recap (steps, artifacts, decisions, timing, and —
-after a poor session — how to send feedback) that every Forge system default
-workflow closes with. Keeping authored workflows consistent with that convention is
-required, not optional. When you assemble the ordered step list:
-
-- If the admin's steps do **not** already end with `session_feedback`,
-  append one yourself as the final step:
-  `{ "skill_id": "session_feedback", "step_order": <last index>, "confirmation_policy": "auto" }`
-  Leave `applicable_expression` unset (NULL) so it always runs — the system
-  defaults gate nothing on the feedback step.
-- If `session_feedback` is already present but **not** last, move it to the
-  end. There must be exactly one, and it must be the final step.
-- When cloning a baseline that already ends with `session_feedback`, keep it
-  (it renders as `KEEP` in the Step 5 diff); a freshly appended one renders
-  as `INSERT`.
-
-`session_feedback` is a system skill, so it always resolves in Step 6's
-referential check — you never need a `new_skills` entry for it. Surface it in
-the proposal like any other step so the admin sees the closing recap (and can
-change its confirmation policy), but do **not** drop it. The only Forge
-workflow that intentionally omits `session_feedback` is the reserved passive
-`observe_session` tracker, which is not authorable here — so this rule has no
-exceptions on the authoring path.
+Authored workflows do **not** need to end with a `session_feedback` step.
+Every run's recap already names the two ways to send feedback, so a separate
+closing step is optional. Do not append one yourself. When cloning a baseline
+that has one, keep it (it renders as `KEEP` in the Step 5 diff) unless the
+admin asks to drop it.
 
 ## Step 5: Iterate conversationally
 
@@ -1070,9 +1064,10 @@ store enforces this. Surface the scope explicitly on each candidate so
 the admin sees what will be reset:
 
 - `scope: 'org'` — the org-level override. Removing it deletes the
-  org's configuration for that workflow AND stops the workflow
-  running: Forge's built-ins ship disabled, so with no org row there
-  is nothing left to turn it on.
+  org's configuration for that workflow. For most built-ins it also
+  stops the workflow running: they ship disabled, so with no org row
+  there is nothing left to turn it on. A launch-set built-in (the
+  `get_workflow` system row shows `enabled: true`) keeps running.
 - `scope: 'team'` — a team-level override. Removing it reverts that
   one team to the org default, which usually keeps the workflow
   running. If the org has no preset of its own, the team falls all the
@@ -1118,10 +1113,13 @@ the admin cannot be undone.
 **Org-scoped target:**
 
 > "Removing this deletes your org's configuration for <workflow name>,
-> and <workflow name> will also STOP RUNNING — Forge's built-in
-> workflows ship disabled, so with no org configuration there's nothing
-> left to turn it on. You can re-enable it from the dashboard, or
-> re-author the override here, but this removal cannot be undone."
+> and <workflow name> will also STOP RUNNING — it ships disabled, so
+> with no org configuration there's nothing left to turn it on. You can
+> re-enable it from the dashboard, or re-author the override here, but
+> this removal cannot be undone."
+
+For a launch-set built-in (its system row is `enabled: true`), say
+instead that it falls back to Forge's default and keeps running.
 
 **Team-scoped target:**
 

@@ -122,12 +122,15 @@ async function main() {
   if (state.status === 'dismissed' || state.observation_due) return;
   const turnsSince = state.turn_count - (state.last_observer_turn || 0);
   if (state.status === 'snoozed') {
-    // `declined_once` is deliberately NOT cleared on the re-offer —
-    // it is what lets the returning offer acknowledge the earlier "no".
+    // "Keep a record?" is asked at most once a session. A decline
+    // lands here as a snooze, and re-offering it later in the same session
+    // asked a question the person had already answered. They can still ask
+    // Forge to track the session themselves; the next session asks afresh.
+    // A snooze the person chose on its own ("remind me later") still returns.
+    if (state.declined_once) return;
     if (turnsSince < CHECKPOINT_INTERVAL) return;
     session.write({ observation_due: { id: randomUUID(), reason: 'wake', queued_at: at,
-      turn_count: state.turn_count, wake_condition: state.wake_condition,
-      declined_once: !!state.declined_once } });
+      turn_count: state.turn_count, wake_condition: state.wake_condition } });
     return;
   }
   if (state.status || state.observer_blocked || state.observer_fired) return;
@@ -146,7 +149,7 @@ async function main() {
   }
   session.write({
     observation_due: { id: randomUUID(), reason: 'initial', queued_at: at,
-      turn_count: state.turn_count, active_ms: active, declined_once: !!state.declined_once },
+      turn_count: state.turn_count, active_ms: active },
     ...baseline,
   });
 }
