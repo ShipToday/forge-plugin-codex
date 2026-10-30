@@ -68,8 +68,10 @@ function deliver(session, state, event) {
   // cannot tell a wake-up from a request the user is making of Forge right now
   // (it never reads the message), so the directive leaves that to the model: a
   // request to (resume) tracking IS the wake-up, and any other Forge request
-  // comes first.
-  if (state.status === 'snoozed' && !due && state.wake_condition) {
+  // comes first. Not after a decline: "keep a record?" is asked at most once a
+  // session, and a wake check would have the model bring it back on its own
+  // judgment. Asking Forge to track the session still routes to the observer.
+  if (state.status === 'snoozed' && !due && state.wake_condition && !state.declined_once) {
     return `FORGE ROUTING: The tracking offer in this session is snoozed. Wake condition: ` +
       `${JSON.stringify(oneLine(state.wake_condition))}. To wake, invoke the "forge-autopilot" skill via the ` +
       `Skill tool with the input "observe session — start the observe_session workflow for passive tracking" ` +

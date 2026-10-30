@@ -376,6 +376,20 @@ function bareName(toolName) {
   return m ? m[1] : toolName;
 }
 
+/**
+ * Is this tool call coming from a helper agent rather than the main thread?
+ * A helper's hook events carry the same session id as the main thread, so the
+ * session cannot tell them apart. The host names the agent instead: an
+ * `agent_id` on the event, or a transcript kept under a `subagents` folder.
+ * Neither present means the main thread — the conservative reading, since the
+ * main thread is the one a pending question holds.
+ */
+function isHelperAgent(event) {
+  if (typeof event?.agent_id === 'string' && event.agent_id) return true;
+  const transcript = typeof event?.transcript_path === 'string' ? event.transcript_path : '';
+  return /[\\/]subagents[\\/]/.test(transcript);
+}
+
 function isUniversallyAllowed(bare) {
   if (ALWAYS_ALLOWED_BARE_NAMES.has(bare)) return true;
   for (const prefix of READONLY_PREFIXES) {
@@ -512,7 +526,7 @@ async function main() {
 
   // Scope state to this Claude Code session.
   const sessionState = sessionStateModule.forSession(event.session_id);
-  const state = sessionState.read();
+  let state = sessionState.read();
   const bare = bareName(toolName);
 
   // An update to a run this session does not hold, or holds for recovery, waits
@@ -524,6 +538,13 @@ async function main() {
   const call = require('./tool-event.cjs').identifyForgeCall(event);
   const callId = call?.input?.conversation_id;
   if (call?.name.endsWith('forge__update_state') && typeof callId === 'string' && callId) {
+    // A run this session parked behind a later one (a workflow started
+    // mid-step) is brought to the front, so the update is checked against its
+    // own question and write lock rather than refused as untracked.
+    if (sessionStateModule.isParked(state, callId)) {
+      try { state = sessionState.update((current) => sessionStateModule.bringRunToFront(current, callId)); }
+      catch { /* lock contention — the checks below use the state as read */ }
+    }
     const untracked = !state.active_workflow && state.last_observer_conversation_id !== callId;
     if (untracked || state.workflow_recovery_required) {
       deny('Recover this workflow with forge__get_workflow_state before updating it. Its current question and write lock must be restored first.');
@@ -756,9 +777,17 @@ async function main() {
   // client's call, not this hook's.
   if (SHELL_TOOLS.test(bare)) return;
 
-  // Layer 1: CHECKPOINT enforcement.
+  // Layer 1: CHECKPOINT enforcement. A helper agent the main thread started
+  // keeps working while the person decides: the question is the main
+  // thread's to wait on, and a helper's reads (a search, a test run, a file it
+  // was asked to look at) do not answer it. What a helper may NOT do is act on
+  // the decision before it is made, so its writes stay held until the answer
+  // lands, exactly as the main thread's are.
   if (state.pending_checkpoint) {
-    deny(buildCheckpointDenyReason(state, bare));
+    if (!isHelperAgent(event) || isWriteTool(bare, event)) {
+      deny(buildCheckpointDenyReason(state, bare));
+      return;
+    }
     return;
   }
 
