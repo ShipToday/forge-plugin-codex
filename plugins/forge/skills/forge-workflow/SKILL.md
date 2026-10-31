@@ -141,7 +141,8 @@ response shape:
   "sdlc_stages": [{ "id", "label", "description", "sort_order", "color" }, ...],
   "caller":    {
     "orgRole", "orgId", "userId",
-    "teams": [{ "id", "name", "description" }, ...]
+    "teams": [{ "id", "name", "description" }, ...],
+    "team_scope_available": true | false | null  /* admins only */
   },
   "state_categories": [{ "id", "label", "description" }, ...],
   "capabilities": [{ "id", "label", "consuming", "producing",
@@ -161,9 +162,10 @@ response shape:
 draft or change a workflow — they come from the server, so they can change
 without an update to this skill. When `practice_profile.status` is `ok`,
 start from it: your first question or proposal cites at least one of its
-facts. Require a skill from its `skills_inventory` on a step only when that
-skill's `coverage` is `every`; name one found in fewer repositories as "use
-when present". When you save, pass what you learned about how the team does
+facts. Require skills as the `tailoring_rules` say: one your project's own
+instructions require, on the step where they require it, or one from
+`skills_inventory` whose `coverage` is `every`; name one found in fewer
+repositories as "use when present". When you save, pass what you learned about how the team does
 the work as `practice_facts` beside `workflow` — `[{ activity, fact,
 evidence: [...] }]`. A fact without evidence is dropped.
 
@@ -182,7 +184,9 @@ this skill is admin-only (see the role gate just below), it lists
 **every team in your org** — not only the ones you belong to — so you
 can target a team without first joining it. Use it to offer
 scope targets and to map a user-supplied team name to its id when
-drafting a team-scoped workflow (see Step 4).
+drafting a team-scoped workflow (see Step 4). `caller.team_scope_available`
+says whether your org's plan lets a workflow be scoped to a team at all:
+`false` means it does not, `null` means the plan could not be checked.
 
 Check `caller.orgRole` immediately:
 
@@ -591,6 +595,18 @@ along with the draft check from Step 5 when the proposal is ready:
   (anyone in that scope can see and run it), or "Org admins only"
   (hidden from members; you can open it up later from the Workflows
   page).
+
+**When the plan has no team workflows, don't ask where it lives.** If
+`caller.team_scope_available` is `false`, the org is not on the Team
+plan and a team-scoped save is refused. Drop the scope question: the
+workflow is for the whole org (send neither `team_name` nor `team_id`),
+and say so in one line of the proposal: "Your plan doesn't include team
+workflows, so this one is for the whole org." Ask the access question as
+usual. If the admin asked for a team anyway, tell them their plan doesn't
+include team workflows and offer the whole org instead. When it is
+`true`, or `null` or missing (the plan could not be checked, or an older
+server), ask about scope as below: never treat an unchecked plan as one
+without teams.
 
 Take the team options from `caller.teams`. A blocking
 `request_user_input` question takes two or three options, so list
@@ -1035,6 +1051,7 @@ envelope, explain it plainly and offer to adjust:
 | `admin_required`          | Caller is not an org admin                     | STOP — not recoverable in this session     |
 | `invalid_request`         | Payload failed schema validation               | Show `field` (and `step_index` if present), fix the value, retry. For `new_skills.needs`: replace each id in `unknown_needs` with one from `available_needs`, and for each `{ capability, requires }` entry in `missing_prerequisites`, add the `requires` category to that skill's `needs`. For `new_skills.consumes` / `new_skills.produces`: replace each id in `unknown_capabilities` with one from `authorable_capabilities`, or drop the declaration. Show the admin any changed reads before retrying. |
 | `team_not_in_org`         | Team scope but the supplied `team_id` does not belong to the caller's org | Pick a team in your own org, or use org scope |
+| `entitlement_required`    | Team scope, but the org's plan doesn't include team workflows | Say so plainly and offer to save for the whole org; don't retry the team |
 | `team_not_found`          | `team_name` did not match any team in the org  | Show `available_teams` and ask which to use |
 | `team_store_unavailable`  | `team_name` used but team store is not wired   | Ask the admin to pass `team_id` directly  |
 | `duplicate_id`            | Workflow or skill id already exists            | Rename and retry                          |
