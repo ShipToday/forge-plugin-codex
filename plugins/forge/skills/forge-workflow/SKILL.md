@@ -963,7 +963,6 @@ Skeleton (the actual fields you include depend on the manifest):
     "auto_classify":      true,
     "enabled":            true,
     "hydrator_config":    {},
-    "ai_coding_policy":   null,
     "steps": [
       {
         "skill_id":              "...",
