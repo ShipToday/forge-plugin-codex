@@ -121,18 +121,10 @@ async function main() {
   }
   if (state.status === 'dismissed' || state.observation_due) return;
   const turnsSince = state.turn_count - (state.last_observer_turn || 0);
-  if (state.status === 'snoozed') {
-    // "Keep a record?" is asked at most once a session. A decline
-    // lands here as a snooze, and re-offering it later in the same session
-    // asked a question the person had already answered. They can still ask
-    // Forge to track the session themselves; the next session asks afresh.
-    // A snooze the person chose on its own ("remind me later") still returns.
-    if (state.declined_once) return;
-    if (turnsSince < CHECKPOINT_INTERVAL) return;
-    session.write({ observation_due: { id: randomUUID(), reason: 'wake', queued_at: at,
-      turn_count: state.turn_count, wake_condition: state.wake_condition } });
-    return;
-  }
+  // "Keep a record?" is asked at most once a session. A decline and a snooze the
+  // person chose both land here, and neither is re-offered from Stop; a wake
+  // condition they chose is checked per prompt by passive-observation.cjs.
+  if (state.status === 'snoozed') return;
   if (state.status || state.observer_blocked || state.observer_fired) return;
   // An observer that already ran this session comes back only after a
   // cooldown, never on the very next Stop. The client never re-arms an offer:

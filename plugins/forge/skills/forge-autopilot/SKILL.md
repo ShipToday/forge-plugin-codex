@@ -75,6 +75,16 @@ platform commands (`/help`, `/clear`, etc.) — Forge workflows never use these.
 For each skill found, include `{ "name": "<skill-name>", "description": "<brief description>" }`.
 If no relevant local skills are found, omit the `local_skills` parameter entirely.
 
+### Automatic admission
+
+On **every** `forge__start_workflow` call, include:
+
+`client_capabilities: ["auto_admission"]`
+
+It tells Forge this client starts an approach Forge worked out as soon as the
+person has seen it, without a Start question first. Like the field below, it
+applies to every call form shown, which omit it for readability.
+
 ### Codex delegation authorization
 
 Invoking this applicable Forge skill authorizes Codex to use model-tier
@@ -245,7 +255,11 @@ conversation and current phase**:
 - Never set `start_confirmed: true` without the server-issued
   `admission_token` from the immediately preceding proposal.
 - When the proposal is an approach Forge worked out for the request ("How
-  Forge will approach this"), show it to the person and ask them; never
+  Forge will approach this"), show it to the person exactly as written and
+  follow the confirmation it returns. This client reports automatic
+  admission, so Forge tells you to start it in the same turn, with no Start
+  question; the person can stop it, or change its steps, at any time. If the
+  confirmation asks you to put Start to the person instead, do that and never
   confirm it yourself.
 
 ### Exception 1 — Help / recommendation request
