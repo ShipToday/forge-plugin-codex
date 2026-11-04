@@ -75,6 +75,17 @@ platform commands (`/help`, `/clear`, etc.) — Forge workflows never use these.
 For each skill found, include `{ "name": "<skill-name>", "description": "<brief description>" }`.
 If no relevant local skills are found, omit the `local_skills` parameter entirely.
 
+### Current repository
+
+When a current checkout is available, read `git remote get-url origin` (or
+reuse the remote already observed for this request) and send it as
+`repo_remote` on every `forge__start_workflow` call. This applies to built-in
+workflows and worked-out approaches, including routing, team selection,
+admission confirmation and follow-up calls. Preserve it on every re-call so
+the first practice read and the opening brief use the current repository.
+If there is no checkout, no origin, or the read is unavailable, omit the field;
+never guess it from a repository mentioned in a ticket or example.
+
 ### Automatic admission
 
 On **every** `forge__start_workflow` call, include:
