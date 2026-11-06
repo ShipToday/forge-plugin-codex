@@ -446,8 +446,9 @@ while a write is waiting for the user's approval. Two layers:
 
 **Layer 1 — CHECKPOINT enforcement.** When the orchestrator returns a
 `**CHECKPOINT**` response from `forge__update_state` (a relayed-question
-skill is awaiting user input), the only tools you may call until the
-user has answered are:
+skill is awaiting user input), the hook holds write tools — the same ones the
+write lock holds (tracker, docs and messaging writes, code-host connector
+writes, `apply_patch` and other file edits) — until the user has answered. Everything else passes:
 
 - a compatible, permitted user-input tool (`request_user_input` or
   `request_user_input_async`) or a direct user question — relay the pending
@@ -455,18 +456,17 @@ user has answered are:
 - `forge__update_state` — advance with the user's answer
 - `forge__abandon_workflow` — exit when the workflow no longer applies (see
   below; it is not a way to end a run early)
-- Read-only inspection: filesystem reads and search, plus read-only MCP tools
-  (names starting with `list_`, `get_`, `search_`, `query_`, `fetch_`,
-  `read_`, `notion-search`, `notion-fetch`, `notion-get-`, and Slack's
-  `slack_read_`, `slack_search_`, `slack_list_`, `slack_get_`)
-- `ToolSearch` may be used to discover the deferred Forge recovery tools.
-- Task coordination can be requested, but Codex child tasks do not inherit the
-  parent hook session; Forge cannot enforce this checkpoint inside another
-  task. Do not use that boundary to advance the pinned workflow.
+- Reads, such as filesystem reads and search, web fetch and search, and
+  read-only MCP tools
+- `ToolSearch`, to discover the deferred Forge recovery tools, and the host's
+  own task-list, progress and coordination tools. Codex child tasks do not
+  inherit the parent hook session; Forge cannot enforce this checkpoint inside
+  another task. Do not use that boundary to advance the pinned workflow.
 
 The hook does not check shell commands, here or anywhere (see below). While a
 question is pending, the instructions still apply: wait for the user's answer,
-and use the shell only to inspect, never to act on the decision being asked.
+and use any tool or the shell only to ask, inspect or coordinate, never to act
+on the decision being asked.
 
 **Layer 2 — the write lock.** A step set to Always asks that writes carries a
 `**Write Lock**: on` line until its write plan is approved. Until then the hook

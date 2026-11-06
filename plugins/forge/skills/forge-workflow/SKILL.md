@@ -336,11 +336,18 @@ matched (`system` | `org` | `team`). `steps_fallback_to_system: true`
 means the row at that scope changes no steps: it only switches the
 workflow on or off, sets who can see it, or renames it, and every step
 follows the default. That is a normal state, not a broken override.
+`steps_inherited: true` is wider: the row saves no step list of its own,
+so its steps come from a parent (the built-in, or for a team the org's
+version), even when the row tweaks a step or two.
 
 Skill metadata is included on each step (`skill_name`,
 `skill_description`, `skill_default_confirmation`,
 `skill_suggested_expression`) so you can render a readable baseline
 without a second skill lookup.
+
+Keep the response's `workflow.edition`. An edit to this baseline is
+saved as step changes against it (Step 9), so you never have to send
+the whole workflow back.
 
 If `forge__get_workflow` is not available in your environment, stop
 and ask the admin to enumerate the existing steps before drafting.
@@ -993,6 +1000,56 @@ On success (`{ ok: true, workflow_id, scope }`), tell the admin the
 workflow is live and can be reached via the AI classifier when a
 user's request matches the workflow's `classifier_hint`.
 
+### Editing a workflow that already exists: send only the changes
+
+When the baseline came from `forge__get_workflow` (Modify existing in
+Step 3b) and the admin changed some of it, do NOT send the whole
+definition back. A long workflow cannot be retyped into one call: the
+client cuts it off before it reaches Forge. Send only what changes:
+
+```json
+{
+  "workflow": { "id": "...", "team_name": "...", "name": "only if it changes" },
+  "base_edition": "<workflow.edition from the forge__get_workflow read>",
+  "step_changes": [
+    { "op": "remove", "step_order": 4, "skill_id": "..." },
+    { "op": "update", "step_order": 2, "skill_id": "...", "fields": { "instructions": "...", "confirmation_policy": "required" } },
+    { "op": "insert", "after_step_order": 6, "step": { "skill_id": "...", "instructions": "..." } }
+  ]
+}
+```
+
+- `workflow` holds the id, the scope (`team_name` / `team_id`, as for
+  a full save) and only the top-level fields that change. Never
+  `steps`: send either `steps` or `step_changes`, not both. A field you
+  leave out keeps the value saved now, even if it changed after your
+  read.
+- To change only top-level fields (a rename, a new description), send
+  `"step_changes": []`.
+- Each change names a step by its `step_order` **in the read**, not as
+  shifted by the changes above it. `skill_id` on a remove or update is
+  a check that the step runs that skill; include it.
+- An update sends only the step fields that change. Everything else
+  about the step stays as it is.
+- `after_step_order: -1` inserts first. A new step starts with the
+  defaults for any field it leaves out.
+- At most 200 changes per save. The reply carries the new `edition`
+  and `changes_applied`; send further changes against that edition.
+- Changes edit only a workflow saved at the scope they target: read it
+  with the same `team_name` / `team_id` you save with, and check that
+  the read's `scope` is that scope. A read that falls back to the org's
+  or the built-in version (a team or org saving its first version of
+  someone else's workflow) is a full save, not step changes. When the
+  read is that scope's but `steps_inherited` is true, its steps come
+  from a parent: `"step_changes": []` can still change its top-level
+  fields, but changing a step needs one full save there first.
+
+Send a full definition (the skeleton above) only for a brand-new
+workflow, a first version at this scope, after "Replace from scratch",
+or when most steps change. A long new workflow can be saved short, then
+extended with `insert` changes in a few saves, each using the `edition`
+the previous save returned.
+
 ### Step 9a: Surface any soft warnings
 
 When the success response also includes a `warnings: [...]` array, the
@@ -1054,6 +1111,12 @@ envelope, explain it plainly and offer to adjust:
 | `team_not_found`          | `team_name` did not match any team in the org  | Show `available_teams` and ask which to use |
 | `team_store_unavailable`  | `team_name` used but team store is not wired   | Ask the admin to pass `team_id` directly  |
 | `duplicate_id`            | Workflow or skill id already exists            | Rename and retry                          |
+| `changed_since_read`      | The edit was built against an edition that is no longer saved (someone else changed its fields or steps in between); nothing was saved | Read it again with `forge__get_workflow`, rebuild the changes against the new read, and if what changes is now different, show the admin before saving |
+| `not_saved_at_scope`      | Step changes sent for a scope with no saved version of this workflow (`inherits_from` names the one it uses), or one whose steps are inherited (`missing: "steps"`); nothing was saved | Save it at that scope once in full (Step 9's skeleton), then edit it with step changes; for top-level fields alone, `"step_changes": []` works on an inherited-steps version |
+| `step_not_found` / `step_mismatch` | A step change names a `step_order` the read did not have, or a step that runs another skill | Check the change against the read (`change_index` names it) and fix it; nothing was saved |
+| `not_found`               | No workflow with that id at any scope          | Check the id against the catalog          |
+| `team_overrides_affected` | An org edit would put a different step at a number a team has its own step setting for (`affected_team_overrides` names each team and step) | Tell the admin which teams and steps, then ask the admin to choose, the way "How to ask the admin" describes: "Insert after the last step instead" (Recommended: no team's step numbers change), "Reset <team> to the org version and save" (that team loses every setting it has for this workflow, not just this step; the reset and the edit happen together or not at all, and you ask again before saving), or "Something else". No tool clears one team step setting, and the dashboard's drawer only changes it, so changing it there leaves the save refused. On a reset: confirm it with Step D3's team-scoped wording, then send the same step changes with the same `base_edition` plus `reset_teams` listing each team's `team_name` from `affected_team_overrides`. Never reset the team first with `forge__delete_workflow`: that reset stays even if the edit is then refused. The reply's `teams_reset` lists each team reset; if the save is refused, no team was reset |
+| `empty_result`            | The changes would remove every step            | Keep at least one step, or remove the override with `forge__delete_workflow` (Step D1) |
 | `referential_error`       | A `skill_id` doesn't resolve on the server     | Fix the reference and retry               |
 | `constraint_violation`    | Generic DB constraint failed                   | Show the server message and ask admin     |
 

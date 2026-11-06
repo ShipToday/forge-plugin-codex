@@ -8,8 +8,10 @@
  *
  *   1. CHECKPOINT enforcement: when the orchestrator has emitted
  *      a relayed-question CHECKPOINT and the workflow-tracker hook has set
- *      `pending_checkpoint: true`, only AskUserQuestion / forge__update_state
- *      / forge__abandon_workflow / read-only inspection may proceed.
+ *      `pending_checkpoint: true`, tools on the write list are held until the
+ *      user answers. Everything else (asking, reading, the host's own UI and
+ *      coordination tools) proceeds, so a tool this hook has never heard of
+ *      is not refused.
  *
  *   2. The write lock: while an Always-asks step's write plan is
  *      unapproved, tools on the write list are held. The server decides the
@@ -298,6 +300,16 @@ const WRITE_PATTERNS = [
   /^create_pull_request_review$/, /^push_files$/, /^create_or_update_file$/, /^delete_file$/,
   /^add_issue_comment$/, /^create_branch$/, /^create_repository$/, /^fork_repository$/,
   /^create_label$/, /^create_draft$/,
+  // GitHub's combined tools, which create, update or delete by `method`.
+  // Named one by one: a tool this list does not know passes, so a pattern
+  // such as "anything ending in _write" would hold other connectors' tools
+  // on a guess.
+  /^issue_write$/, /^sub_issue_write$/, /^label_write$/, /^pull_request_review_write$/,
+  /^discussion_comment_write$/, /^projects_write$/, /^custom_properties_write$/,
+  /^update_issue_comment$/, /^add_reply_to_pull_request_comment$/, /^add_comment_to_pending_review$/,
+  /^actions_run_trigger$/, /^request_copilot_review$/, /^assign_copilot_to_issue(?:_with_intent)?$/,
+  /^create_pull_request_with_copilot$/, /^create_gist$/, /^update_gist$/, /^delete_repository$/,
+  /^create_repository_ruleset$/,
 
   // Docs — Notion writes, Claude Docs (batch/update/create/delete), Google
   // Drive. Artifact and ArtifactData are told apart by action, below.
@@ -374,20 +386,6 @@ function bareName(toolName) {
   // (e.g. `forge__update_state`), which the greedy trailing group preserves.
   const m = toolName.match(/^mcp__.+?__(.+)$/);
   return m ? m[1] : toolName;
-}
-
-/**
- * Is this tool call coming from a helper agent rather than the main thread?
- * A helper's hook events carry the same session id as the main thread, so the
- * session cannot tell them apart. The host names the agent instead: an
- * `agent_id` on the event, or a transcript kept under a `subagents` folder.
- * Neither present means the main thread — the conservative reading, since the
- * main thread is the one a pending question holds.
- */
-function isHelperAgent(event) {
-  if (typeof event?.agent_id === 'string' && event.agent_id) return true;
-  const transcript = typeof event?.transcript_path === 'string' ? event.transcript_path : '';
-  return /[\\/]subagents[\\/]/.test(transcript);
 }
 
 function isUniversallyAllowed(bare) {
@@ -552,6 +550,18 @@ async function main() {
     }
   }
 
+  // Approval authenticity — for a direct forge__update_state call and one a
+  // wrapper script makes alike, since a wrapper is not a write and would
+  // otherwise pass a pending question. Before any stamping below, because a
+  // refusal must not also rewrite the input. See answerWithoutAsking.
+  if (call?.name.endsWith('forge__update_state')) {
+    const unasked = answerWithoutAsking(state, { tool_input: call.input });
+    if (unasked) {
+      deny(unasked);
+      return;
+    }
+  }
+
   // Stamp cumulative token usage onto Forge's own
   // forge__update_state call — the deterministic analog of the server-side
   // duration_ms stamp. Fires on EVERY forge__update_state, with NO session-state
@@ -596,10 +606,10 @@ async function main() {
     // Leave malformed ordinary calls for server validation, without rewriting
     // them into an apparently valid but corrupted object.
     if (!normalized) return;
-    // Approval authenticity — before the checkpoint claim and any
-    // stamping, because a refusal must neither spend a claim nor rewrite the
-    // input. Codex reads the normalized call, so an answer sent inside a
-    // string state_updates is checked too. See answerWithoutAsking.
+    // Approval authenticity, again on the normalized call — still before the
+    // checkpoint claim and any stamping. The check above reads the raw input,
+    // so an answer sent inside a string state_updates is only caught here.
+    // See answerWithoutAsking.
     const unasked = answerWithoutAsking(state, { tool_input: normalized });
     if (unasked) {
       deny(unasked);
@@ -777,14 +787,18 @@ async function main() {
   // client's call, not this hook's.
   if (SHELL_TOOLS.test(bare)) return;
 
-  // Layer 1: CHECKPOINT enforcement. A helper agent the main thread started
-  // keeps working while the person decides: the question is the main
-  // thread's to wait on, and a helper's reads (a search, a test run, a file it
-  // was asked to look at) do not answer it. What a helper may NOT do is act on
-  // the decision before it is made, so its writes stay held until the answer
-  // lands, exactly as the main thread's are.
+  // Layer 1: CHECKPOINT enforcement. What must wait for the person's answer is
+  // acting on the decision, so writes are held until it lands, for the main
+  // thread and any helper agent alike. Everything else proceeds: reads, the
+  // question itself, and the host's own UI and coordination tools. This uses
+  // the write list, like the write lock, rather than a list of tools that may
+  // pass, so a new host tool or a new AI client is not refused by default.
+  // A wrapper script passes like any other tool the guard cannot classify:
+  // when unsure, let it through. Hosts that run such scripts send each call
+  // inside them to this hook on its own, where writes and answers are checked
+  // by name; a single literal answer in the script itself was checked above.
   if (state.pending_checkpoint) {
-    if (!isHelperAgent(event) || isWriteTool(bare, event)) {
+    if (isWriteTool(bare, event)) {
       deny(buildCheckpointDenyReason(state, bare));
       return;
     }
