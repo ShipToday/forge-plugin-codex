@@ -800,7 +800,7 @@ it in a relay envelope:
 > **Relay to the user** — render the block between the sentinels below ...
 
 <<<FORGE_DISPLAY_VERBATIM id="position:step_<uuid>">>>
-### Step 2 of 8: Discover AI SDLC
+### Step 1 of 6: Find the Atlas
 next: ... · then: ...
 
 ---
