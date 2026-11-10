@@ -283,7 +283,7 @@ inheriting normally:
 |---|---|
 | Change how much a step asks (Never asks / AI decides / Always asks) | Drawer |
 | Turn one step off, or back on | Drawer |
-| Reset a workflow's policies to the recommendation for their AI maturity | Drawer |
+| Reset a workflow's policies to the recommended settings | Drawer |
 | Different steps, a different order, or steps that do not exist yet | **Author here** |
 | A process the catalog has no workflow for | **Author here** |
 
@@ -531,8 +531,7 @@ categories it requires (the same values appear as `required_needs` on
 authoring never offers but an override carries over from its baseline.
 Add those categories to the skill's `needs` for every capability it
 consumes, and for a capability it produces when it reports a detection
-for the repository it is working in (a survey whose report names each
-repository itself is exempt). Add each category once, and explain it
+for the repository it is working in. Add each category once, and explain it
 in plain language. If the admin does not want that read, revise the
 skill and its capability declaration together; do not leave a declared
 capability without its prerequisites.

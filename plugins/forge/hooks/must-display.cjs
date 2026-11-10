@@ -12,7 +12,7 @@
  * "render this verbatim" directive. Rendering it is the client's job.
  *
  * Measured behaviour says that job is done unreliably. In one observed
- * `forge_setup` run NONE of the eight position markers reached the user;
+ * eight-step run NONE of the eight position markers reached the user;
  * in later runs of the identical server payload (byte-for-byte — the
  * envelopes declare the same `bytes=` count) every marker rendered. The
  * variable was not the model (it failed on Sonnet and succeeded on both
@@ -87,7 +87,7 @@
  * `hook_system_message` transcript attachment that the user never sees, so
  * the model's render was the only visible copy — and suppressing it took
  * the preflight brief and every "Step N of M" marker off screen entirely
- * (observed across a full forge_setup run, plugin v1.13.0).
+ * (observed across a full eight-step run, plugin v1.13.0).
  *
  * The asymmetry is what settles it. A duplicate render costs tokens and
  * looks untidy; a suppressed render costs the user the only view they have
@@ -148,7 +148,7 @@ const RULE_RE = /^-{3,}$/;
  *   - A plain string
  *   - A FILE PATH — Claude Code replaces tool output above ~10,000 chars with
  *     a path to the spilled content. This matters here rather than being a
- *     rare edge: real forge_setup step payloads run 11–19 KB, so the spill is
+ *     rare edge: real multi-step payloads run 11–19 KB, so the spill is
  *     the COMMON case for exactly the tool this hook targets. A version that
  *     only handled inline text would work on short responses and silently
  *     no-op on every long one — i.e. fail precisely where the attention-capture
