@@ -89,10 +89,16 @@ async function main() {
     const active = activeMsFromResolved(resolved, since, now);
     const delta = Math.max(0, Number.isFinite(active) ? active : now - since);
     const checkpointId = old?.id || randomUUID();
+    // The window travels inside the queued payload (frozen like the rest), so
+    // the guard never has to restore it. An aggregate keeps its first start.
+    const oldWindow = old?.state_updates.activity_window;
+    const window = { start: oldWindow?.start || new Date(since).toISOString(), end: at,
+      source: Number.isFinite(active) && oldWindow?.source !== 'wall_clock' ? 'transcript_idle_capped' : 'wall_clock' };
     const updates = {
       codex_checkpoint_id: checkpointId,
       outcome: 'checkpoint', event_type: 'observation_outcome',
       duration_ms: (old?.state_updates.duration_ms || 0) + delta,
+      activity_window: window,
       work_item_key: state.work_item_key || null, sdlc_stage: state.sdlc_stage || 'other',
       ...(event.session_id ? { client_session_id: event.session_id } : {}),
     };

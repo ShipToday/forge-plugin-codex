@@ -11,9 +11,10 @@ function matches(state, call) {
       id !== state.checkpoint_delivery?.id ||
       call.conversation_id !== sent.conversation_id ||
       call.completed_step !== sent.completed_step) return false;
-  // The guard may refresh cumulative tokens; all other frozen fields must match.
-  const { token_usage: incomingTokens, ...incoming } = call.state_updates;
-  const { token_usage: queuedTokens, ...queued } = sent.state_updates;
+  // The guard may refresh cumulative tokens and attach earlier unrecorded
+  // activity; all other frozen fields must match.
+  const { token_usage: incomingTokens, unrecorded_activity: incomingActivity, ...incoming } = call.state_updates;
+  const { token_usage: queuedTokens, unrecorded_activity: queuedActivity, ...queued } = sent.state_updates;
   return isDeepStrictEqual(incoming, queued);
 }
 
