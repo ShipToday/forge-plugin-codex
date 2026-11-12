@@ -29,6 +29,7 @@
 const sessionStateModule = require('./session-state.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { attempted } = require('./checkpoint-claim.cjs');
+const { captureBeforeWorkflow, acknowledgeActivity } = require('./activity-intervals.cjs');
 const { normalizeToolEvent, wrappedForgeCall } = require('./tool-event.cjs');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
@@ -1186,7 +1187,8 @@ async function main() {
     }
     // A run already in front is parked, not overwritten: it comes back when
     // this one ends, or when it is updated again.
-    sessionState.update((state) => ({ ...updates, parked_runs: sessionStateModule.parkFrontRun(state, conversationId) }));
+    sessionState.update((state) => ({ ...captureBeforeWorkflow(state, event), ...updates,
+      parked_runs: sessionStateModule.parkFrontRun(state, conversationId) }));
     return;
   }
 
@@ -1244,6 +1246,7 @@ async function main() {
         sessionState.write({ checkpoint_delivery: { ...state.checkpoint_delivery,
           processed_at: new Date().toISOString() } });
       }
+      if (header.complete) sessionState.update(state => acknowledgeActivity(state, rawEvent.tool_response, call));
       // A completed-observer checkpoint is NOT completion of another active
       // workflow. It must not reset the already-reserved time boundary.
       return;
@@ -1267,6 +1270,7 @@ async function main() {
       return;
     }
     if (tracked.workflow_recovery_required) return;
+    if (header.complete) sessionState.update(state => acknowledgeActivity(state, rawEvent.tool_response, callInput));
     if (header.marker && header.stepToken) {
       sessionState.write({ current_step_token: header.stepToken, workflow_activity_at: new Date().toISOString(),
         ...(header.expiry ? { workflow_expiry: header.expiry } : {}) });
