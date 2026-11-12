@@ -27,6 +27,7 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { captureBeforeWorkflow, acknowledgeActivity } = require('./activity-intervals.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { attempted } = require('./checkpoint-claim.cjs');
 const { normalizeToolEvent, wrappedForgeCall } = require('./tool-event.cjs');
@@ -1186,7 +1187,8 @@ async function main() {
     }
     // A run already in front is parked, not overwritten: it comes back when
     // this one ends, or when it is updated again.
-    sessionState.update((state) => ({ ...updates, parked_runs: sessionStateModule.parkFrontRun(state, conversationId) }));
+    sessionState.update((state) => ({ ...captureBeforeWorkflow(state, event), ...updates,
+      parked_runs: sessionStateModule.parkFrontRun(state, conversationId) }));
     return;
   }
 
@@ -1238,6 +1240,9 @@ async function main() {
       return;
     }
     if (passive.outcome === 'checkpoint' && call.completed_step === 'session_observer') {
+      if (header.complete && /Checkpoint recorded/.test(text)) {
+        sessionState.update(state => acknowledgeActivity(state, rawEvent.tool_response, call));
+      }
       const state = sessionState.read();
       if (attempted(sessionState, state, call) && !state.checkpoint_delivery.processed_at &&
           /Checkpoint recorded/.test(text)) {
@@ -1267,6 +1272,7 @@ async function main() {
       return;
     }
     if (tracked.workflow_recovery_required) return;
+    if (header.complete) sessionState.update(state => acknowledgeActivity(state, rawEvent.tool_response, callInput));
     if (header.marker && header.stepToken) {
       sessionState.write({ current_step_token: header.stepToken, workflow_activity_at: new Date().toISOString(),
         ...(header.expiry ? { workflow_expiry: header.expiry } : {}) });

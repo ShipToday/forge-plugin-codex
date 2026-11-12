@@ -329,6 +329,8 @@ function freshState(sessionId) {
     // of the active-time window it stamps onto forge__update_state's
     // duration_ms. null until the first step begins.
     step_active_since: null,
+    unrecorded_activity: [],
+    workflow_request_at: null,
     // ── observation gate contract: forge_observation_enabled ───────────
     // Per-Claude-Code-session cache of the org-admin's observation
     // toggle (an org setting the server reads and surfaces to the

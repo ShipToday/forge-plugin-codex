@@ -94,6 +94,7 @@ async function main() {
       outcome: 'checkpoint', event_type: 'observation_outcome',
       duration_ms: (old?.state_updates.duration_ms || 0) + delta,
       work_item_key: state.work_item_key || null, sdlc_stage: state.sdlc_stage || 'other',
+      ...(state.unrecorded_activity?.length ? { unrecorded_activity: state.unrecorded_activity } : {}),
       ...(event.session_id ? { client_session_id: event.session_id } : {}),
     };
     const names = [...(old?.state_updates.skill_invocations || []), ...skills.slice(reserved).map(s => s.name)];

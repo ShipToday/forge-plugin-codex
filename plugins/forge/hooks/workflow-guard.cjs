@@ -75,6 +75,7 @@
 'use strict';
 
 const sessionStateModule = require('./session-state.cjs');
+const { activityForUpdate } = require('./activity-intervals.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { claim } = require('./checkpoint-claim.cjs');
 
@@ -526,6 +527,7 @@ async function main() {
   const sessionState = sessionStateModule.forSession(event.session_id);
   let state = sessionState.read();
   const bare = bareName(toolName);
+  if (bare === 'forge__start_workflow') sessionState.write({ workflow_request_at: new Date().toISOString() });
 
   // An update to a run this session does not hold, or holds for recovery, waits
   // for forge__get_workflow_state: the run's question and write lock are
@@ -647,6 +649,8 @@ async function main() {
       //     observer — instead of counting one per conversation), and
       //   - duration_ms (idle-excluded active time; active-workflow steps only).
       let changed = typeof event.tool_input === 'string' || typeof event.tool_input?.state_updates === 'string';
+      const earlier = activityForUpdate(state, stateUpdates);
+      if (earlier) { stateUpdates.unrecorded_activity = earlier; changed = true; }
       // Never clobber a token_usage the caller already set (defensive — the
       // model does not set it today, but a future client might). The one
       // exception is a Codex passive checkpoint: its token_usage is a snapshot
