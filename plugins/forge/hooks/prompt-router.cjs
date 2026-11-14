@@ -12,6 +12,9 @@
  * forge-autopilot skill and the server's instructions. This hook reads nothing
  * in the message to decide it: no Forge name, no SDLC vocabulary, no work item
  * key. (A key used to earn an advisory routing hint; that is gone.)
+ *
+ * Verified work context adds scope guidance to that same payload while an
+ * initial tracking offer is still possible (work-context.cjs).
  * Preserve this Codex adaptation during plugin synchronization.
  */
 
@@ -20,6 +23,7 @@
 const sessionStateModule = require('./session-state.cjs');
 const { readHeadRef } = require('./git-head.cjs');
 const { deliver, additionalContext } = require('./passive-observation.cjs');
+const workContext = require('./work-context.cjs');
 
 // -- Directive builders ------------------------------------------------------
 
@@ -84,6 +88,8 @@ async function main() {
   // sessions in the same directory each track their own workflow.
   const sessionState = sessionStateModule.forSession(event.session_id);
   const state = sessionState.read();
+  const contextTurn = workContext.beginTurn(sessionState, event.session_id, state);
+  if (contextTurn) Object.assign(state, contextTurn);
 
   // Approval authenticity: a prompt arriving while a question is
   // pinned is the user's turn on it — a numbered reply, or a plain answer
@@ -159,9 +165,22 @@ async function main() {
   let passive = '';
   try { passive = deliver(sessionState, state, event); } catch { passive = ''; }
 
+  // Verified work context: scope guidance while an initial tracking offer is
+  // still possible, in the same additionalContext payload. Scope is a model
+  // decision bound to this prompt, never a lexical hook rule. Judged after
+  // delivery: a prompt that delivers the queued initial offer has made that
+  // offer, so it requests no receipt. The routing skill loads guidance on
+  // demand for an explicit save instead.
+  let continuity = '';
+  if (contextTurn) {
+    try { continuity = workContext.directive(passive ? sessionState.read() : state, event.session_id); }
+    catch { continuity = ''; }
+  }
+
   // Otherwise silent. The model answers, and starts Forge only if the user
   // asked for it (the forge-autopilot skill's trigger rule).
-  if (passive) process.stdout.write(additionalContext(passive));
+  const context = [continuity, passive].filter(Boolean).join('\n\n');
+  if (context) process.stdout.write(additionalContext(context));
 }
 
 main().catch(() => {

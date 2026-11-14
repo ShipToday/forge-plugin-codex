@@ -28,9 +28,10 @@
  *   - A tool the read-only rules or the write list do not know is allowed.
  *     Unknown tools (custom MCP connectors, future built-ins) should not be
  *     blocked by a closed-world list.
- *   - Shell tools (Bash, PowerShell, Shell, Monitor) are never checked: not by
- *     the write lock, not while a question is pending. This hook does not read
- *     commands. Which commands a step should run is left to the step's
+ *   - Shell tools (Bash, PowerShell, Shell, Monitor) are never held: not by
+ *     the write lock, not while a question is pending. The sole exception to
+ *     leaving command text alone is an exact current scope-receipt command,
+ *     which may be auto-approved. Which other commands a step should run is left to the step's
  *     instructions and the AI client; parsing shell to prove a command safe
  *     meant modelling every host's shell dialect, and each gap refused
  *     legitimate work.
@@ -65,7 +66,7 @@
  * is resolvable. forge__update_state is read through hook-input's stateCall,
  * because Codex can send `state_updates` as a JSON string; the approval check
  * reads that normalized call too. All other logic is identical to the Claude
- * Code source — keep it that way on every plugin sync (/shiptoday-plugin).
+ * Code source — keep it that way on every plugin sync.
  *
  * @see plugin/hooks/token-usage.cjs for the transcript-parsing capture adapters
  * @see plugin/hooks/workflow-tracker.cjs for the state writes this hook reads
@@ -352,7 +353,8 @@ function actionWrites(bare, event) {
   return !(action && reads.has(action));
 }
 
-// Tools that run a command. The guard never checks them — see the header.
+// Command tools are never held. Only the exact receipt exemption above may
+// auto-approve one; all others keep host permissions — see the header.
 const SHELL_TOOLS = /^(?:Bash|PowerShell|Shell|Monitor)$/;
 
 /**
@@ -527,7 +529,50 @@ async function main() {
   const sessionState = sessionStateModule.forSession(event.session_id);
   let state = sessionState.read();
   const bare = bareName(toolName);
-  if (bare === 'forge__start_workflow') sessionState.write({ workflow_request_at: new Date().toISOString() });
+  // Approved exception: only our own exact current receipt can
+  // bypass a permission prompt. Never parse or auto-approve other shell work.
+  if ((bare === 'Bash' || (process.platform === 'win32' && bare === 'PowerShell'))
+      && event.tool_input && typeof event.tool_input === 'object'
+      && !Array.isArray(event.tool_input)
+      && Object.keys(event.tool_input).every(key => ['command', 'description', 'timeout', 'run_in_background', 'dangerouslyDisableSandbox'].includes(key))
+      && (event.tool_input.run_in_background === undefined || event.tool_input.run_in_background === false)
+      && (event.tool_input.dangerouslyDisableSandbox === undefined || event.tool_input.dangerouslyDisableSandbox === false)
+      && require('./work-context.cjs').isReceiptCommand(state, event.session_id, event.tool_input.command)
+      // Codex: an allow decision is answered only by builds that honor it
+      // (the same floor as updatedInput); older builds keep host permissions.
+      && codexSupportsUpdatedInput(event)) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse',
+      permissionDecision: 'allow', permissionDecisionReason: 'Exact current Forge scope receipt; no recording or enrollment.' } }));
+    return;
+  }
+  const call = require('./tool-event.cjs').identifyForgeCall(event);
+  if (call?.name.endsWith('forge__start_workflow') && call.input?.session_action === 'save'
+      && call.input.work_context != null) {
+    const continuity = require('./work-context.cjs');
+    const current = continuity.current(state, event.session_id);
+    const reference = call.input.work_context;
+    if (!continuity.sameScope(state, event.session_id) || !current
+        || reference.source_run_id !== current.source_run_id || reference.revision !== current.revision) {
+      deny('Clarify the explicit target for this save request. The remembered work reference needs a fresh same_scope receipt for this turn and current revision; changed, uncertain, missing or stale scope cannot reuse it. Retry with the user-confirmed explicit target and omit the old work_context reference.');
+      return;
+    }
+  }
+  if (bare === 'forge__start_workflow') {
+    sessionState.write({ workflow_request_at: new Date().toISOString() });
+    // Context binding uses the real host chat, never a model-supplied id.
+    // Codex: the stamp is an updatedInput rewrite, so it is version-gated.
+    if (require('./work-context.cjs').validSessionId(event.session_id) && codexSupportsUpdatedInput(event)) {
+      try {
+        let toolInput = event.tool_input || {};
+        if (typeof toolInput === 'string') toolInput = JSON.parse(toolInput);
+        if (toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)) {
+          process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse',
+            permissionDecision: 'allow', updatedInput: { ...toolInput, client_session_id: event.session_id } } }));
+          return;
+        }
+      } catch { /* old/malformed host input keeps the legacy path */ }
+    }
+  }
 
   // An update to a run this session does not hold, or holds for recovery, waits
   // for forge__get_workflow_state: the run's question and write lock are
@@ -535,7 +580,6 @@ async function main() {
   // binds the run from its snapshot, and a run the server no longer has binds
   // nothing; binding first held writes for runs that had expired or never
   // existed, and no reply could lift that hold.
-  const call = require('./tool-event.cjs').identifyForgeCall(event);
   const callId = call?.input?.conversation_id;
   if (call?.name.endsWith('forge__update_state') && typeof callId === 'string' && callId) {
     // A run this session parked behind a later one (a workflow started
