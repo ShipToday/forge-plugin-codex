@@ -125,6 +125,15 @@ async function main() {
     });
     return;
   }
+  // A fresh same-work receipt suppresses just the initial offer. It never
+  // consumes the observer latch or touches periodic linked/logged checkpoints.
+  // An initial offer still queued from an earlier Stop is stale for this
+  // same-work turn, so it is dropped rather than delivered on the next prompt.
+  if (!state.status && !state.observer_blocked && !state.observer_fired
+      && require('./work-context.cjs').sameScope(state, event.session_id)) {
+    if (state.observation_due?.reason === 'initial') session.write({ observation_due: null });
+    return;
+  }
   if (state.status === 'dismissed' || state.observation_due) return;
   const turnsSince = state.turn_count - (state.last_observer_turn || 0);
   // "Keep a record?" is asked at most once a session. A decline and a snooze the

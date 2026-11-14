@@ -2,15 +2,19 @@
 name: forge-autopilot
 description: >
   Routes a request to Forge by ShipToday — ONLY when the user asks for Forge by
-  name. Invoke this skill when the user's current message contains "@forge",
-  "forge", "@shiptoday" or "shiptoday" (any case) and asks Forge to do something:
-  plan, define, implement, fix, review, estimate, ship, check status, or map
+  name. Invoke when the user's current message contains "@forge", "forge",
+  "@shiptoday" or "shiptoday" (any case) and asks Forge to do something: plan,
+  define, implement, fix, review, estimate, ship, check status, or map
   architecture. Also invoke when a Forge hook directive (FORGE ROUTING, FORGE
-  OBSERVATION, FORGE CHECKPOINT) explicitly tells you to. Do NOT invoke for any
+  OBSERVATION, FORGE CHECKPOINT) tells you to, or for an explicit
+  current request to save this discussion using valid verified Work Context;
+  load guidance on demand and route that save only
+  after recording a fresh same_scope receipt for this turn. Bare issue keys
+  and general tracking requests do not qualify. Do NOT invoke for any other
   message that does not name Forge — however much it looks like product or
-  engineering work, and even when it contains a tracked work item key such as
-  "PROJ-123": handle it normally. If the mention is ambiguous (for example "we
-  deploy with Laravel Forge"), ask whether the user meant Forge before invoking.
+  engineering work, even with a tracked work item key like "PROJ-123": handle
+  it normally. If the mention is ambiguous (e.g. "we deploy with Laravel
+  Forge"), ask whether the user meant Forge before invoking.
 ---
 
 # Forge Autopilot
@@ -18,7 +22,7 @@ description: >
 You are routing requests to Forge via the `forge` MCP server. Forge runs only
 when the user asks for it by name — see the **Trigger rule** in Step 2. A
 request that does not name Forge gets a normal response, however SDLC-shaped
-it is.
+it is, except the explicit save-discussion route below.
 
 Forge's workflow catalog lives on the server side and is fully data-driven.
 You don't need to know which workflows exist — `forge__start_workflow` will
@@ -149,7 +153,8 @@ protocol.
 
 Forge starts only when the user's **current message** asks for it by name: it
 contains `@forge`, `forge`, `@shiptoday` or `shiptoday` (any case) with a clear
-request for Forge. Nothing else starts a workflow. Without the keyword, handle
+request for Forge. The explicit save-discussion exception below also applies.
+Without either, handle
 the request normally, even when it is SDLC-shaped (plan, review, fix, ship,
 estimate) and even when it names a tracked work item key such as `PROJ-123`.
 That includes when the user is:
@@ -178,6 +183,52 @@ Forge hook directive, not on the user's words.
 
 **Whether the user asked is your call.** No hook reads their words to route,
 approve or block a start.
+
+### Verified work continuity and an explicit save request
+
+A `FORGE WORK CONTEXT` hook directive supplies server-verified issue context
+and a ready-made local receipt command only while the initial offer is still
+eligible. Judge whether the current request is
+clearly the same work, changed work, or uncertain. Run that command with
+`same_scope`, `changed_scope`, or `uncertain` for this turn and revision only.
+Related Q&A about the same target stays ordinary chat and needs no repeated
+tracking offer. This receipt changes initial-offer eligibility only: it does
+not link the session, record work, authorize a write, or choose an observer
+outcome. Hooks never classify prompt words. Never reuse a receipt across turns
+or context revisions. Separate or uncertain work cannot inherit the remembered
+target; keep the existing offers and clarification behavior. Active workflows
+and pending decisions keep their own guards and progression.
+
+An explicit **current** request to save or attach this discussion to its
+verified current work item may invoke this skill without the Forge keyword.
+This is a request to save once, not consent to enroll the chat in tracking.
+If this turn supplied no `FORGE WORK CONTEXT` directive, load it on demand with
+`node "<plugin root>/hooks/work-context.cjs" --describe <actual host session id>`,
+where the plugin root is the folder two levels above this skill's directory.
+Do this only for the current explicit save request, never for ordinary chat.
+The read-only lookup keeps normal host permissions and does not create a
+receipt. If it fails or returns no current guidance, clarify the explicit
+target rather than guessing. Run the returned receipt command exactly as given
+with your shell tool; only its exact current session, nonce, revision and
+disposition are exempt from permission prompts. Do not alter the command or
+combine it with other work.
+Reuse the remembered reference only after successfully recording a fresh
+`same_scope` receipt for this turn and current context revision. For
+`changed_scope`, `uncertain`, missing or stale receipts, ask for an explicit
+target and omit the old `work_context` reference. Do not infer the target
+from the remembered issue. Use the host session id and structured values
+supplied by the current hook only on the validated same-scope route:
+
+`forge__start_workflow(feature_request: <the actual save request>, connected_tools, workflow: "observe_session", session_action: "save", work_context: {source_run_id: <verified source run>, revision: <current revision>}, client_session_id: <actual host session id>, local_skills: <detected_skills>)`
+
+Do not infer a save request from same-work classification, a bare issue key,
+or a previous request. Do not replace the parent target with a supporting
+subissue. If the current scope, target, source run, revision or host identity
+is missing, stale or ambiguous, clarify instead of guessing. Server authority
+verifies the unique source and one-shot save; honor any clarification or
+refusal. A `saved_once` completion saves only that discussion: do not persist
+linked status, enrollment keys/stage/checkpoint baselines, or show a follow-up
+menu. Existing explicit Link/Create tracking choices retain their usual flow.
 
 For a request that names Forge, your **default action** is:
 
@@ -364,7 +415,8 @@ session observer. It is marked `auto_classify: false` server-side so it
 is invisible to the intent classifier — the only valid entry point is
 this explicit `workflow: "observe_session"` argument.
 
-**Client authority stops at eligibility.** The hook and client AI may decide
+**Client authority stops at eligibility.** A valid current same-work receipt
+suppresses only the redundant initial offer described above. Otherwise, the hook and client AI may decide
 only whether the conversation contains project-related SDLC work. If it does,
 start `observe_session`; if it does not, skip it. Do not choose, infer, or
 encode a tracking outcome on the user's behalf, and do not replace an eligible

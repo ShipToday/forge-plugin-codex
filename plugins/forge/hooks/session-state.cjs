@@ -239,6 +239,12 @@ function freshState(sessionId) {
     // on every engineering-time checkpoint. null until the observer sets them.
     wake_condition: null,
     work_item_key: null,
+    // Continuity only: separate from passive enrollment and checkpoint keys.
+    work_context: null,
+    work_context_owner: null,
+    work_context_versions: {},
+    work_context_turn: null,
+    work_context_receipt: null,
     // Set when the user softly declines the observer offer. NOT
     // cleared by the snooze re-fire, so a returning offer can acknowledge
     // the earlier "no" instead of repeating itself verbatim (AC4).
@@ -391,6 +397,7 @@ const RUN_FIELDS = Object.freeze([
   'workflow_expiry',
   'workflow_activity_at',
   'current_step_token',
+  'work_context',
 ]);
 const MAX_PARKED_RUNS = 5;
 
@@ -418,7 +425,7 @@ function parkFrontRun(state, incoming = null) {
 function bringRunToFront(state, conversationId) {
   if (!isParked(state, conversationId) || state.conversation_id === conversationId) return null;
   const target = parkedRuns(state).find((run) => run.conversation_id === conversationId);
-  return { ...target, parked_runs: parkFrontRun(state, conversationId) };
+  return { ...target, work_context_receipt: null, parked_runs: parkFrontRun(state, conversationId) };
 }
 
 // A user's prompt is their turn on every question still open, parked or not:
@@ -444,7 +451,23 @@ function endRun(state, conversationId, release) {
   }
   const next = parked.at(-1);
   if (!next) return { ...release, parked_runs: [] };
-  return { ...release, ...next, parked_runs: parked.slice(0, -1) };
+  return { ...release, ...next, work_context_receipt: null, parked_runs: parked.slice(0, -1) };
+}
+
+// A scope nonce has at most the context's 12-hour useful lifetime. Delete it
+// independently so crashed prompt writers and old clients cannot leave orphan
+// sidecars forever. A fresh orphan can precede a contended state write, so keep
+// it until that bound. Removing nonce authority always fails closed.
+function cleanupScopeTurn(fp, now) {
+  try { if (now - fs.statSync(fp).mtimeMs >= TTL_MS) fs.unlinkSync(fp); } catch { /* absent or raced */ }
+}
+
+// A removed root file normally takes its nonce with it. A sidecar newer than
+// the root may belong to an in-flight prompt; leave that one to its own TTL.
+function removeRootState(fp, stat) {
+  fs.unlinkSync(fp);
+  const nonce = `${fp}.scope-turn`;
+  try { if (fs.statSync(nonce).mtimeMs <= stat.mtimeMs) fs.unlinkSync(nonce); } catch { /* absent or raced */ }
 }
 
 /** Remove stale session files and recovery records without letting one bad file
@@ -455,6 +478,10 @@ function cleanupStale() {
     let files;
     try { files = fs.readdirSync(dir); } catch { continue; }
     for (const file of files) {
+      if (!recovery && /^[a-f0-9]{16}\.json\.scope-turn$/.test(file)) {
+        cleanupScopeTurn(path.join(dir, file), now);
+        continue;
+      }
       // Codex sidecars expire on the ordinary cleanup window.
       if (!file.endsWith('.json') && !( !recovery && ['.tmp', '.display', '.attempt'].some(ext => file.endsWith(ext)))) continue;
       const fp = path.join(dir, file);
@@ -470,7 +497,9 @@ function cleanupStale() {
         catch {
           // A corrupt recent recovery record might still be rewritten by an
           // active hook; only remove it after the ordinary cleanup window.
-          if (now - stat.mtimeMs > CLEANUP_AGE_MS) fs.unlinkSync(fp);
+          if (now - stat.mtimeMs > CLEANUP_AGE_MS) {
+            if (recovery) fs.unlinkSync(fp); else removeRootState(fp, stat);
+          }
           continue;
         }
         const lastActivity = Date.parse(state.workflow_activity_at);
@@ -478,7 +507,7 @@ function cleanupStale() {
         const active = state.active_workflow && (workflowTtl(state) || state.workflow_recovery_required);
         if (active && !holdLapsed(now - since, workflowTtl(state))) continue;
         if (recovery && !active && now - stat.mtimeMs <= CLEANUP_AGE_MS) continue;
-        fs.unlinkSync(fp);
+        if (recovery) fs.unlinkSync(fp); else removeRootState(fp, stat);
       } catch {
         // Best-effort cleanup is per file: another hook may have changed it.
       }
