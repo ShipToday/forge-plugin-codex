@@ -582,6 +582,17 @@ async function main() {
   // nothing; binding first held writes for runs that had expired or never
   // existed, and no reply could lift that hold.
   const callId = call?.input?.conversation_id;
+  if (call?.name.endsWith('forge__get_workflow_state') && typeof callId === 'string' && callId
+      && typeof event.tool_use_id === 'string' && event.tool_use_id) {
+    try {
+      sessionState.update(current => {
+        const target = sessionStateModule.bringRunToFront(current, callId) || current;
+        const generation = target.conversation_id === callId ? target.workflow_recovery_generation ?? null : null;
+        const reads = (current.workflow_recovery_reads || []).filter(read => read.id !== event.tool_use_id);
+        return { workflow_recovery_reads: [...reads, { id: event.tool_use_id, conversation_id: callId, generation }].slice(-32) };
+      });
+    } catch { /* the read is still useful, but cannot clear a generation-bound hold */ }
+  }
   if (call?.name.endsWith('forge__update_state') && typeof callId === 'string' && callId) {
     // A run this session parked behind a later one (a workflow started
     // mid-step) is brought to the front, so the update is checked against its
@@ -617,7 +628,7 @@ async function main() {
     if (!passive && callId) {
       try {
         sessionState.update(current => current.active_workflow && current.conversation_id === callId
-          ? { step_resync_required: true } : null);
+          ? { step_resync_required: true, workflow_recovery_generation: require('node:crypto').randomUUID() } : null);
       } catch {
         deny('Could not persist the workflow recovery hold. Recover with forge__get_workflow_state before updating this workflow.');
         return;

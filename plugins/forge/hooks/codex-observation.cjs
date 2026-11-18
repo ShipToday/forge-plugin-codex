@@ -55,15 +55,21 @@ function observationFor(event, now = Date.now()) {
 // This header belongs to the persisted function-call OUTPUT, not to the raw
 // stdout in a hook event. Require the whole runtime header before Output:, so
 // text printed by a test cannot manufacture a status. Match by call id too.
-function rolloutExit(output) {
+function rolloutStatus(output) {
   if (typeof output !== 'string') return null;
   output = output.replace(/\r\n/g, '\n');
   const end = output.indexOf('\nOutput:\n');
   if (end < 0) return null;
   const header = output.slice(0, end);
-  const match = /^(?:Chunk ID: [\w.-]+\n)?Wall time: \d+(?:\.\d+)? seconds\nProcess exited with code (-?\d+)(?:\nOriginal token count: \d+)?$/.exec(header);
-  const exit = match ? Number(match[1]) : null;
-  return Number.isInteger(exit) && Math.abs(exit) <= 2147483647 ? exit : null;
+  const match = /^(?:Chunk ID: [\w.-]+\n)?Wall time: \d+(?:\.\d+)? seconds\nProcess (?:exited with code (-?\d+)|running with session ID (\d+))(?:\nOriginal token count: \d+)?$/.exec(header);
+  if (!match) return null;
+  if (match[2] !== undefined) return { processId: Number(match[2]) };
+  const exit = Number(match[1]);
+  return Number.isInteger(exit) && Math.abs(exit) <= 2147483647 ? { exit } : null;
+}
+
+function rolloutExit(output) {
+  return rolloutStatus(output)?.exit ?? null;
 }
 
 function reconcileObservations(state, resolved) {
@@ -72,11 +78,35 @@ function reconcileObservations(state, resolved) {
     && !c.codex_exit_verified && c.codex_call_id).map(c => c.codex_call_id));
   if (!pending.size) return null;
   const exits = new Map();
+  const processes = new Map();
+  const polls = new Map();
   for (const rec of resolved.records || []) {
     const payload = rec?.type === 'response_item' && rec.payload;
-    if (payload?.type !== 'function_call_output' || !pending.has(payload.call_id)) continue;
-    const exit = rolloutExit(payload.output);
-    if (exit !== null) exits.set(payload.call_id, exit);
+    if (!payload || typeof payload.call_id !== 'string') continue;
+    if (payload.type === 'function_call' && payload.name === 'write_stdin') {
+      const processId = object(payload.arguments)?.session_id;
+      if (Number.isSafeInteger(processId) && processes.has(processId)) {
+        polls.set(payload.call_id, { processId, origin: processes.get(processId) });
+      }
+    } else if (payload.type === 'function_call_output') {
+      const status = rolloutStatus(payload.output);
+      if (!status) continue;
+      // For a yielded shell, the final Bash hook uses the original command ID
+      // while the rollout uses the poll's ID. Follow the original process via
+      // the recorded write_stdin arguments; never match status by stdout.
+      const poll = polls.get(payload.call_id);
+      if (poll) {
+        polls.delete(payload.call_id);
+        if (status.exit !== undefined && processes.get(poll.processId) === poll.origin) {
+          processes.delete(poll.processId);
+          if (pending.has(poll.origin)) exits.set(poll.origin, status.exit);
+        }
+      } else if (status.processId !== undefined) {
+        processes.set(status.processId, payload.call_id);
+      } else if (pending.has(payload.call_id)) {
+        exits.set(payload.call_id, status.exit);
+      }
+    }
   }
   if (!exits.size) return null;
   return { observed_calls: state.observed_calls.map(c => c.kind === 'shell' && exits.has(c.codex_call_id)

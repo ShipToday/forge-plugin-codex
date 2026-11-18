@@ -43,12 +43,14 @@ planning or shipping work or mentions a ticket like `PROJ-123`.
 
 Workflow updates hold write tools before submission. A confirmed reply or
 `forge__get_workflow_state` restores the current step; a failed MCP call that
-produces no post-tool hook leaves the hold in place. Shell commands remain
-subject to the host's permissions.
+produces no post-tool hook leaves the hold in place. Recovery replies from
+reads dispatched before a newer update cannot clear that update's hold. Shell
+commands remain subject to the host's permissions.
 
 Test evidence recognizes native `apply_patch` edits. Shell exit codes come
 from structured runtime status or the matching call's persisted Codex rollout
-header, never from text printed by the command. Rollouts are resolved under
+header. For a command that yields, the adapter follows the process ID to the
+terminal `write_stdin` result. Rollouts are resolved under
 `CODEX_HOME` when set. Without a verifiable status, the exit remains unknown
 and observation support is not claimed. Ephemeral sessions and wrapped calls
 without a matching runtime receipt may therefore have no verified shell evidence.
