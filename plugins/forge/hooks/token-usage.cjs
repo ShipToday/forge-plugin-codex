@@ -403,7 +403,7 @@ function resolveCodexRolloutPath(event) {
   const sessionId = event.session_id;
   if (!sessionId) return null;
   try {
-    const sessionsRoot = path.join(os.homedir(), '.codex', 'sessions');
+    const sessionsRoot = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
     for (let i = 0; i < 3; i++) {
       const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
       const dir = path.join(

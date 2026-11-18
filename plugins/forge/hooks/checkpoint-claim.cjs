@@ -4,7 +4,7 @@ const fs = require('fs');
 const { isDeepStrictEqual } = require('util');
 const { UUID_RE } = require('./hook-input.cjs');
 
-function matches(state, call) {
+function matches(state, call, afterRewrite = false) {
   const sent = state.delivered_checkpoint;
   const id = call.state_updates.codex_checkpoint_id;
   if (!UUID_RE.test(String(id || '')) || id !== sent?.id ||
@@ -15,6 +15,14 @@ function matches(state, call) {
   // activity; all other frozen fields must match.
   const { token_usage: incomingTokens, unrecorded_activity: incomingActivity, ...incoming } = call.state_updates;
   const { token_usage: queuedTokens, unrecorded_activity: queuedActivity, ...queued } = sent.state_updates;
+  // Pre-call validation stays strict: the caller cannot add evidence to the
+  // frozen payload. Only the post-call match tolerates the guard's own stamp.
+  if (afterRewrite) {
+    delete incoming.observed_tool_calls;
+    delete incoming.observation_supported;
+    delete queued.observed_tool_calls;
+    delete queued.observation_supported;
+  }
   return isDeepStrictEqual(incoming, queued);
 }
 
@@ -52,7 +60,7 @@ function claim(session, call, state = session.read()) {
 // The claim file is the proof: a processing receipt is only written for a
 // submission that actually passed through the guard.
 function attempted(session, state, call) {
-  return matches(state, call) &&
+  return matches(state, call, true) &&
     fs.existsSync(attemptPath(session, call.state_updates.codex_checkpoint_id));
 }
 

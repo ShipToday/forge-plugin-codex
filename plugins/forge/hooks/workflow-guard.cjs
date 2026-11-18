@@ -77,7 +77,7 @@
 
 const sessionStateModule = require('./session-state.cjs');
 const { activityForUpdate } = require('./activity-intervals.cjs');
-const { observationsForUpdate } = require('./observed-calls.cjs');
+const { observationsForUpdate, reconcileObservations } = require('./codex-observation.cjs');
 const { stateCall } = require('./hook-input.cjs');
 const { claim } = require('./checkpoint-claim.cjs');
 
@@ -582,6 +582,17 @@ async function main() {
   // nothing; binding first held writes for runs that had expired or never
   // existed, and no reply could lift that hold.
   const callId = call?.input?.conversation_id;
+  if (call?.name.endsWith('forge__get_workflow_state') && typeof callId === 'string' && callId
+      && typeof event.tool_use_id === 'string' && event.tool_use_id) {
+    try {
+      sessionState.update(current => {
+        const target = sessionStateModule.bringRunToFront(current, callId) || current;
+        const generation = target.conversation_id === callId ? target.workflow_recovery_generation ?? null : null;
+        const reads = (current.workflow_recovery_reads || []).filter(read => read.id !== event.tool_use_id);
+        return { workflow_recovery_reads: [...reads, { id: event.tool_use_id, conversation_id: callId, generation }].slice(-32) };
+      });
+    } catch { /* the read is still useful, but cannot clear a generation-bound hold */ }
+  }
   if (call?.name.endsWith('forge__update_state') && typeof callId === 'string' && callId) {
     // A run this session parked behind a later one (a workflow started
     // mid-step) is brought to the front, so the update is checked against its
@@ -602,10 +613,26 @@ async function main() {
   // otherwise pass a pending question. Before any stamping below, because a
   // refusal must not also rewrite the input. See answerWithoutAsking.
   if (call?.name.endsWith('forge__update_state')) {
-    const unasked = answerWithoutAsking(state, { tool_input: call.input });
+    const normalizedCall = stateCall(call.input);
+    const unasked = answerWithoutAsking(state, { tool_input: normalizedCall || call.input });
     if (unasked) {
       deny(unasked);
       return;
+    }
+    // Codex sends no PostToolUse event for failed MCP calls. Hold writes BEFORE
+    // forwarding an update: a lost reply may have advanced into a locked step.
+    // A recognized successful reply or get_workflow_state clears this existing
+    // hold. An observer checkpoint does not advance the active workflow.
+    const passive = normalizedCall?.completed_step === 'session_observer'
+      && normalizedCall.state_updates.outcome === 'checkpoint';
+    if (!passive && callId) {
+      try {
+        sessionState.update(current => current.active_workflow && current.conversation_id === callId
+          ? { step_resync_required: true, workflow_recovery_generation: require('node:crypto').randomUUID() } : null);
+      } catch {
+        deny('Could not persist the workflow recovery hold. Recover with forge__get_workflow_state before updating this workflow.');
+        return;
+      }
     }
   }
 
@@ -689,7 +716,11 @@ async function main() {
     // With nothing to stamp, a caller-sent value is removed. Done before
     // anything else can fail, so a failure later still strips it.
     const callerSentObserved = Object.hasOwn(stateUpdates, 'observed_tool_calls') || Object.hasOwn(stateUpdates, 'observation_supported');
+    let resolved = null;
+    try { resolved = resolveSessionRecords(event); } catch { /* capture is best-effort */ }
     try {
+      const refreshed = sessionState.update(current => reconcileObservations(current, resolved));
+      if (refreshed) state = refreshed;
       const observed = observationsForUpdate(state);
       if (observed) {
         stateUpdates.observed_tool_calls = observed.calls;
@@ -710,7 +741,6 @@ async function main() {
       // Resolve the session log ONCE per invocation — token capture and the
       // active-time stamp below consume the same parsed records instead of
       // each re-reading multi-MiB transcript files.
-      const resolved = resolveSessionRecords(event);
       const tokens = captureTokenUsageFromResolved(resolved);
       // Track whether we enriched state_updates at all. Three independent stamps
       // can fire on the SAME tracked update_state, and the rewrite must be

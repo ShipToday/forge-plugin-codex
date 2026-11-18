@@ -33,7 +33,8 @@ const { stateCall } = require('./hook-input.cjs');
 const { attempted } = require('./checkpoint-claim.cjs');
 const { captureBeforeWorkflow, acknowledgeActivity } = require('./activity-intervals.cjs');
 const { normalizeToolEvent, wrappedForgeCall } = require('./tool-event.cjs');
-const { observationFor, recordObservation } = require('./observed-calls.cjs');
+const { observationFor, recordObservation } = require('./codex-observation.cjs');
+const { randomUUID } = require('node:crypto');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
 
@@ -214,8 +215,11 @@ function heldRunGone(state, toolResponse, toolInput) {
 // does, together with its recovery hold. A run this session parked behind it
 // comes back to the front (see endRun in session-state.cjs).
 function releaseRun(sessionState, conversationId = null) {
-  const state = sessionState.read();
-  endHeldRun(sessionState, conversationId, {
+  sessionState.update(state => endedRunChanges(state, conversationId, releaseRunFields(state)));
+}
+
+function releaseRunFields(state) {
+  return {
     last_checkpoint_turn: state.turn_count || 0,
     active_workflow: false,
     observer_blocked: true,
@@ -232,16 +236,21 @@ function releaseRun(sessionState, conversationId = null) {
     write_lock: null,
     current_step_skill: null,
     step_resync_required: false,
+    workflow_recovery_generation: null,
     workflow_recovery_required: false,
     workflow_expiry: null,
     current_step_token: null,
     last_checkpoint_at: new Date().toISOString(),
-  });
+  };
+}
+
+function endedRunChanges(state, conversationId, release) {
+  return { ...sessionStateModule.endRun(state, conversationId, release),
+    ...(conversationId ? { work_context_ended_runs: [...new Set([...(state.work_context_ended_runs || []), conversationId])].slice(-32) } : {}) };
 }
 
 function endHeldRun(sessionState, conversationId, release) {
-  sessionState.update((state) => ({ ...sessionStateModule.endRun(state, conversationId, release),
-    ...(conversationId ? { work_context_ended_runs: [...new Set([...(state.work_context_ended_runs || []), conversationId])].slice(-32) } : {}) }));
+  sessionState.update(state => endedRunChanges(state, conversationId, release));
 }
 
 // An update or recovery read for a run this session parked brings it to the
@@ -282,16 +291,31 @@ function startHeader(response) {
   return lines.slice(start, end).join('\n');
 }
 
-function resyncFromStateRead(sessionState, toolResponse, toolInput, hostSession) {
-  frontRunFor(sessionState, toolInput);
-  const state = sessionState.read();
-  if (heldRunGone(state, toolResponse, toolInput)) {
-    releaseRun(sessionState, state.conversation_id);
-    return;
-  }
-  if (toolResponse?.isError || toolResponse?.is_error) return;
+function resyncFromStateRead(sessionState, toolResponse, toolInput, event, { toolFailed, wrapped }) {
   if (typeof toolInput === 'string') { try { toolInput = JSON.parse(toolInput); } catch { return; } }
   const requested = toolInput?.conversation_id;
+  sessionState.update(current => {
+    const reads = current.workflow_recovery_reads || [];
+    const receipt = reads.find(read => read.id === event.tool_use_id);
+    const consumed = receipt ? { workflow_recovery_reads: reads.filter(read => read !== receipt) } : null;
+    const front = sessionStateModule.bringRunToFront(current, requested);
+    const state = front ? { ...current, ...front } : current;
+    const generation = state.conversation_id === requested ? state.workflow_recovery_generation ?? null : null;
+    // An older read cannot replace the newer step, release its hold, or end
+    // the run. Check the dispatch receipt under the same lock as the write.
+    if (receipt ? receipt.conversation_id !== requested || receipt.generation !== generation : generation !== null) {
+      return consumed;
+    }
+    if ((!wrapped || !toolFailed) && heldRunGone(state, toolResponse, toolInput)) {
+      return { ...consumed, ...endedRunChanges(state, requested, releaseRunFields(state)) };
+    }
+    if (toolFailed || toolResponse?.is_error || (state.work_context_ended_runs || []).includes(requested)) return consumed;
+    const updates = stateReadChanges(state, toolResponse, requested, event.session_id);
+    return updates ? { ...consumed, ...front, ...updates } : consumed;
+  });
+}
+
+function stateReadChanges(state, toolResponse, requested, hostSession) {
   const lines = responseText(toolResponse).split('\n');
   const start = lines.findIndex((line) => line.startsWith('Workflow state for conversation `'));
   const conversation = start === -1 ? null : lines[start].match(/^Workflow state for conversation `([^`]+)`/);
@@ -319,9 +343,8 @@ function resyncFromStateRead(sessionState, toolResponse, toolInput, hostSession)
   // step that no longer exists. Release the run exactly as the completion
   // branch in main() would have.
   if (RUN_ENDED_LINE.test(statusLine)) {
-    sessionState.update(state => workContext.adopt(state, contextHeader, hostSession, conversation[1]));
-    releaseRun(sessionState, conversation[1]);
-    return;
+    return { ...workContext.adopt(state, contextHeader, hostSession, conversation[1]),
+      ...endedRunChanges(state, conversation[1], releaseRunFields(state)) };
   }
 
   const pendingStep = extractPendingCheckpointStep(statusLine);
@@ -331,6 +354,7 @@ function resyncFromStateRead(sessionState, toolResponse, toolInput, hostSession)
     active_workflow: true, conversation_id: conversation[1],
     workflow_activity_at: new Date().toISOString(),
     workflow_recovery_required: false, step_resync_required: false,
+    ...(state.workflow_recovery_generation ? { workflow_recovery_generation: randomUUID() } : {}),
     ...(token ? { current_step_token: token } : {}),
     ...(expiry ? { workflow_expiry: expiry } : {}),
     ...workContext.adopt(state, contextHeader, hostSession, conversation[1]),
@@ -343,7 +367,7 @@ function resyncFromStateRead(sessionState, toolResponse, toolInput, hostSession)
     // fresh ask.
     const sameQuestion = state.pending_checkpoint === true
       && (!metadata.questionId || !state.pending_checkpoint_question_id || metadata.questionId === state.pending_checkpoint_question_id);
-    sessionState.write({
+    return {
       ...recovered,
       current_step_skill: bareStepId(pendingStep),
       current_step_tools: extractToolPermissions(headerText),
@@ -354,13 +378,12 @@ function resyncFromStateRead(sessionState, toolResponse, toolInput, hostSession)
       pending_checkpoint_question_id: metadata.questionId || state.pending_checkpoint_question_id || null,
       pending_checkpoint_response_field: metadata.responseField || state.pending_checkpoint_response_field || null,
       ...(sameQuestion ? {} : { pending_checkpoint_asked_at: null, pending_checkpoint_user_turn_at: null }),
-    });
-    return;
+    };
   }
 
   const nextStep = statusLine.match(/^\*\*NEXT STEP\*\*:\s*"([^"]+)"/);
   if (!nextStep) return;
-  sessionState.write({
+  return {
     ...recovered,
     pending_checkpoint: false,
     pending_checkpoint_step: null,
@@ -381,7 +404,7 @@ function resyncFromStateRead(sessionState, toolResponse, toolInput, hostSession)
     // recovery above leaves an unverified step as it is: the pin holds every
     // write, and the RE-ENTRY that releases it carries the step's header.)
     step_resync_required: false,
-  });
+  };
 }
 
 // -- update_state reply header ------------------------------------------------
@@ -1080,12 +1103,7 @@ async function main() {
   // Recovery reads re-sync the CHECKPOINT pin and nothing else.
   // Codex: a failed read said nothing, so it re-syncs nothing.
   if (toolName.includes(WORKFLOW_STATE_READ_PATTERN)) {
-    if (!wrapped && heldRunGone(sessionState.read(), toolResponse, event.tool_input)) {
-      releaseRun(sessionState, sessionState.read().conversation_id);
-      return;
-    }
-    if (toolFailed) return;
-    resyncFromStateRead(sessionState, toolResponse, event.tool_input, rawEvent.session_id);
+    resyncFromStateRead(sessionState, toolResponse, event.tool_input, rawEvent, { toolFailed, wrapped });
     return;
   }
 
@@ -1165,6 +1183,7 @@ async function main() {
       write_lock: null,
       current_step_skill: null,
       step_resync_required: false,
+      workflow_recovery_generation: null,
       // Anti-double-count: the workflow span was already banked — per-step
       // duration_ms stamps for the completed steps plus the __abandoned__ row
       // for the in-flight one. Advance the observer-checkpoint baseline past it
@@ -1195,6 +1214,7 @@ async function main() {
       // The first step may already be locked (Always asks + writes).
       write_lock: extractWriteLock(toolResponse),
       step_resync_required: false,
+      workflow_recovery_generation: null,
       // Active time: the first step begins now. workflow-guard reads this as
       // the lower bound of the active-time window it stamps onto duration_ms.
       step_active_since: new Date().toISOString(),
@@ -1490,34 +1510,14 @@ async function main() {
       if (Object.keys(advanceUpdates).length) sessionState.write(advanceUpdates);
     }
 
-    // A reply this hook can take the active step from carries a marker header
-    // or completes the run. Any other reply to an active run leaves the step
-    // unknown: a saved-result pointer the host put in place of an oversized
-    // reply, an advance whose header the parsing above refused, a transport
-    // failure, the server's own "recover the current workflow state"
-    // duplicate. Keeping the previous step's allowlist and lock fails open
-    // (its shell and no lock, into a step that may be locked), so the step is
-    // marked unverified and workflow-guard holds writes until
-    // forge__get_workflow_state re-syncs it. The one exception is the server's
-    // own `Error:` reply: the call was refused and the run did not move.
-    // (A failed call returned above; this covers an unflagged `Error:` reply.)
-    const refused = /^\s*Error: /.test(responseText(toolResponse));
+    // Install the new step's permissions before releasing the hold. Reads
+    // still in flight against the previous step become stale at this point.
     if (header.marker) {
-      sessionState.write({ step_resync_required: false });
-    } else if (!header.complete && !refused && sessionState.read().active_workflow) {
-      sessionState.write({ step_resync_required: true });
-    }
-
-    // Per-step tool-permission allowlist refresh. Each
-    // step transition publishes a fresh `**Tool Permissions**: …` line;
-    // we mirror it into session state so workflow-guard can enforce the
-    // correct allowlist for the active step. Cleared on workflow
-    // completion / abandonment via the dedicated branches.
-    if (!header.complete && (header.toolPermissions || header.step)) {
-      const updates = {
-        current_step_tools: header.toolPermissions,
-        current_step_skill: header.step,
-      };
+      const updates = { step_resync_required: false };
+      if (header.toolPermissions || header.step) {
+        updates.current_step_tools = header.toolPermissions;
+        updates.current_step_skill = header.step;
+      }
       // The lock travels with the step, so it refreshes from a reply that
       // publishes the step's full marker set — including to null, which is
       // how a step that does not write, or a server predating the marker,
@@ -1531,7 +1531,12 @@ async function main() {
       // and the run recovered through `get_workflow_state`. Absence of a
       // marker is not evidence the lock was released.
       if (header.toolPermissions || header.writeLock) updates.write_lock = header.writeLock;
-      sessionState.write(updates);
+      sessionState.update(current => {
+        if (current.conversation_id !== tracked.conversation_id
+            || current.workflow_recovery_generation !== tracked.workflow_recovery_generation) return null;
+        return { ...updates,
+          ...(current.workflow_recovery_generation ? { workflow_recovery_generation: randomUUID() } : {}) };
+      });
     }
   }
 
@@ -1561,6 +1566,7 @@ async function main() {
       write_lock: null,
       current_step_skill: null,
       step_resync_required: false,
+      workflow_recovery_generation: null,
       // Anti-double-count: the workflow span was already banked per-step
       // via the guard's duration_ms stamps. Advance the observer-checkpoint
       // baseline past it so a logged/linked session's next checkpoint measures

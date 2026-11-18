@@ -79,7 +79,8 @@ function persistRecovery(fp, state) {
     return;
   }
   const saved = {};
-  for (const key of ['active_workflow', 'conversation_id', 'workflow_expiry', 'workflow_activity_at']) saved[key] = state[key];
+  for (const key of ['active_workflow', 'conversation_id', 'workflow_expiry', 'workflow_activity_at',
+    'workflow_recovery_generation']) saved[key] = state[key];
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
@@ -392,6 +393,7 @@ const RUN_FIELDS = Object.freeze([
   'current_step_skill',
   'write_lock',
   'step_resync_required',
+  'workflow_recovery_generation',
   'step_active_since',
   'workflow_recovery_required',
   'workflow_expiry',
