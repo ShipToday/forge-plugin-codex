@@ -33,7 +33,7 @@ const { stateCall } = require('./hook-input.cjs');
 const { attempted } = require('./checkpoint-claim.cjs');
 const { captureBeforeWorkflow, acknowledgeActivity } = require('./activity-intervals.cjs');
 const { normalizeToolEvent, wrappedForgeCall } = require('./tool-event.cjs');
-const { observationFor, recordObservation } = require('./observed-calls.cjs');
+const { observationFor, recordObservation } = require('./codex-observation.cjs');
 
 // -- Tool name patterns (MCP names include dynamic server UUIDs) --------------
 

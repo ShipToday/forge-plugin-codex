@@ -39,6 +39,20 @@ planning or shipping work or mentions a ticket like `PROJ-123`.
   write is waiting for your approval. They never read your message to decide
   anything, make no network calls, and keep session state in local files.
 
+### Codex hook compatibility
+
+Workflow updates hold write tools before submission. A confirmed reply or
+`forge__get_workflow_state` restores the current step; a failed MCP call that
+produces no post-tool hook leaves the hold in place. Shell commands remain
+subject to the host's permissions.
+
+Test evidence recognizes native `apply_patch` edits. Shell exit codes come
+from structured runtime status or the matching call's persisted Codex rollout
+header, never from text printed by the command. Rollouts are resolved under
+`CODEX_HOME` when set. Without a verifiable status, the exit remains unknown
+and observation support is not claimed. Ephemeral sessions and wrapped calls
+without a matching runtime receipt may therefore have no verified shell evidence.
+
 ## Install
 
 This repository is a self-contained Codex plugin marketplace. The marketplace
