@@ -242,8 +242,9 @@ returns the enabled workflow catalog for this user and organization.
   with the roadmap"), do not match yet: ask one question about what should
   exist when the work is done, with options phrased as outcomes the catalog
   can deliver (never workflow ids), plus a final "None of these fit". Forge's
-  returned instructions say, per caller, whether to add "Build a custom
-  workflow" before it. Then classify the answer, and report the ask on the
+  returned instructions say, per caller, whether to add the build option
+  ("Work it out and keep", or "Build a custom workflow" where Forge cannot work
+  an approach out) before it, and use the label they give. Then classify the answer, and report the ask on the
   classified call as `routing_ask: { asked: true, scope: "outcome", offered:
   [<the ids behind the outcomes you offered>] }`.
 - A workflow fits only when it would deliver the named outcome, not feed into
@@ -253,15 +254,18 @@ returns the enabled workflow catalog for this user and organization.
 - If multiple catalog workflows genuinely fit, present only those, always with
   a final "None of these fit" option — a user handed the wrong options must
   never be cornered into one. When Forge's instructions say the caller can
-  author, add "Build a custom workflow" immediately before it and show at most
+  author, add the build option they name immediately before it and show at most
   two candidates (the widget holds four options). After they choose a
   candidate, re-call with that explicit workflow id, `classification_complete:
   true`, and `routing_ask: { asked: true, scope: "catalog", offered: [<the ids
   you offered>] }` — add `authoring_offered: true` when the build option was
   shown. If they pick "None of these fit" — or skip the question — treat the
   request as having no match and follow the instructions Forge returns; do not
-  re-ask. If they pick "Build a custom workflow", take the authoring offer in
-  Forge's instructions directly, carrying their words forward.
+  re-ask. If they pick "Work it out and keep", send the `approach: { compose:
+  true }` call Forge's instructions give, carrying their words forward: Forge
+  runs the request and offers to keep the steps afterwards. If they pick
+  "Build a custom workflow", take the authoring offer in Forge's instructions
+  directly, carrying their words forward.
 - Never invent a workflow, expose a server-side skill id as an option, or set
   `classification_complete: true` without an explicit `workflow` — except when
   sending an `approach` Forge asked you to work out; that call never names a
