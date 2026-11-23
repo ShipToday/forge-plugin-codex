@@ -30,9 +30,8 @@
  * the Codex adapter, and resolveCodexRolloutPath() locates the session's
  * rollout file from the hook event (Codex's stdin mirrors Claude Code's and
  * passes the rollout as `transcript_path`) or, failing that, by a bounded
- * scan of ~/.codex/sessions keyed on the event's session_id. Everything
- * else is identical to the Claude Code source — keep it that way on every
- * plugin sync (/shiptoday-plugin).
+ * scan of ~/.codex/sessions keyed on the event's session_id. The Codex adapter
+ * also skips context-only token counts when selecting a measured snapshot.
  */
 
 'use strict';
@@ -288,12 +287,21 @@ function captureCodexFromRecords(records) {
   let last = null;
   let modelName = null;
   for (const rec of records || []) {
-    const tc = extractCodexTokenCount(rec);
-    if (tc && [tc.input_tokens, tc.cached_input_tokens, tc.cache_write_input_tokens, tc.output_tokens].some(isCount)) {
-      last = tc; // Cumulative; an empty telemetry event carries no measurement.
-    }
     const m = extractCodexModel(rec);
     if (m) modelName = m;
+
+    const tc = extractCodexTokenCount(rec);
+    if (!tc) continue;
+    const counts = [tc.input_tokens, tc.cached_input_tokens, tc.cache_write_input_tokens, tc.output_tokens];
+    if (!counts.some(isCount)) continue;
+
+    // Context-limit markers and local context estimates can carry only a
+    // positive token total. Keep the previous measured breakdown in that case.
+    const lastTotal = (rec.payload || rec).info?.last_token_usage?.total_tokens;
+    const hasContextTotal = [tc.total_tokens, lastTotal].some(total => isCount(total) && Number(total) > 0);
+    if (hasContextTotal && counts.every(count => toInt(count) === 0)) continue;
+
+    last = tc;
   }
   if (!last) return null;
   // OpenAI reports `input_tokens` as the TOTAL prompt INCLUDING cached input
