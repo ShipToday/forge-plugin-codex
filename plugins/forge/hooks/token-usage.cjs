@@ -69,24 +69,28 @@ function groupByRequest(records) {
   const groups = new Map();
   let anon = 0;
   for (const rec of records) {
-    const usage = rec && rec.message && rec.message.usage;
-    if (!usage) continue;
-    const key = rec.requestId || (rec.message && rec.message.id) || `__anon_${anon++}`;
+    const message = rec?.message;
+    const usage = message?.usage;
+    // Claude emits synthetic assistant messages with placeholder counters.
+    if (!usage || message.model === '<synthetic>') continue;
+    const cc = usage.cache_creation;
+    const hasSplit = isCount(cc?.ephemeral_5m_input_tokens) || isCount(cc?.ephemeral_1h_input_tokens);
+    if (!hasSplit && ![usage.input_tokens, usage.cache_read_input_tokens,
+      usage.cache_creation_input_tokens, usage.output_tokens].some(isCount)) continue;
+    const key = rec.requestId || message.id || `__anon_${anon++}`;
     const g = groups.get(key) ||
       { input: 0, cacheRead: 0, output: 0, cc5m: 0, cc1h: 0, ccFlat: 0, model: null };
     // Per-field MAX within a request (streaming snapshots grow monotonically).
     g.input = Math.max(g.input, toInt(usage.input_tokens));
     g.cacheRead = Math.max(g.cacheRead, toInt(usage.cache_read_input_tokens));
     g.output = Math.max(g.output, toInt(usage.output_tokens));
-    const cc = usage.cache_creation;
-    if (cc && (cc.ephemeral_5m_input_tokens != null || cc.ephemeral_1h_input_tokens != null)) {
+    if (hasSplit) {
       g.cc5m = Math.max(g.cc5m, toInt(cc.ephemeral_5m_input_tokens));
       g.cc1h = Math.max(g.cc1h, toInt(cc.ephemeral_1h_input_tokens));
     } else {
       g.ccFlat = Math.max(g.ccFlat, toInt(usage.cache_creation_input_tokens));
     }
-    const model = rec.message.model;
-    if (model) g.model = model;
+    if (message.model) g.model = message.model;
     groups.set(key, g);
   }
   return groups;
@@ -135,26 +139,14 @@ function accumulateClaudeUsageByModel(records, byModelMap) {
 }
 
 /**
- * Convert a per-model accumulator map into a list of non-empty per-model
- * component bags — the shape the hook relays and the orchestrator writes one
- * audit row from per entry.
+ * Keep an explicit zero when the whole capture measured zero. In a nonzero
+ * capture, a zero-only model could turn a truncated real-model delta into $0.
  */
 function byModelList(byModelMap) {
-  const list = [];
-  for (const acc of byModelMap.values()) {
-    if (!(acc.input || acc.cacheRead || acc.cacheCreation5m
-        || acc.cacheCreation1h || acc.cacheCreationFlat || acc.output)) continue;
-    list.push({
-      modelName: acc.modelName,
-      input: acc.input,
-      cacheRead: acc.cacheRead,
-      cacheCreation5m: acc.cacheCreation5m,
-      cacheCreation1h: acc.cacheCreation1h,
-      cacheCreationFlat: acc.cacheCreationFlat,
-      output: acc.output,
-    });
-  }
-  return list;
+  const models = [...byModelMap.values()];
+  const modelsWithUsage = models.filter(acc => acc.input || acc.cacheRead
+    || acc.cacheCreation5m || acc.cacheCreation1h || acc.cacheCreationFlat || acc.output);
+  return modelsWithUsage.length ? modelsWithUsage : models;
 }
 
 /**
@@ -271,9 +263,8 @@ function captureClaudeFromRecords(records) {
   const byModelMap = new Map();
   accumulateClaudeUsage(records, acc);                 // combined (back-compat fields)
   accumulateClaudeUsageByModel(records, byModelMap);   // per-model attribution
-  const result = finalize(acc);
-  if (result) result.byModel = byModelList(byModelMap);
-  return result;
+  if (!byModelMap.size) return null;
+  return { ...acc, byModel: byModelList(byModelMap) };
 }
 
 /** Path-based wrapper (kept for tests / direct callers). */
@@ -298,7 +289,9 @@ function captureCodexFromRecords(records) {
   let modelName = null;
   for (const rec of records || []) {
     const tc = extractCodexTokenCount(rec);
-    if (tc) last = tc; // CUMULATIVE — last event wins (summing overcounts ~19.6x)
+    if (tc && [tc.input_tokens, tc.cached_input_tokens, tc.cache_write_input_tokens, tc.output_tokens].some(isCount)) {
+      last = tc; // Cumulative; an empty telemetry event carries no measurement.
+    }
     const m = extractCodexModel(rec);
     if (m) modelName = m;
   }
@@ -318,21 +311,9 @@ function captureCodexFromRecords(records) {
   // separate column needed.
   acc.output = toInt(last.output_tokens);
   acc.modelName = modelName;
-  const result = finalize(acc);
   // Codex is single-model per session — emit a one-element byModel so the
   // orchestrator's per-model write path is uniform across adapters.
-  if (result) {
-    result.byModel = [{
-      modelName: result.modelName,
-      input: result.input,
-      cacheRead: result.cacheRead,
-      cacheCreation5m: result.cacheCreation5m,
-      cacheCreation1h: result.cacheCreation1h,
-      cacheCreationFlat: result.cacheCreationFlat,
-      output: result.output,
-    }];
-  }
-  return result;
+  return { ...acc, byModel: [acc] };
 }
 
 /** Path-based wrapper (kept for tests / direct callers). */
@@ -493,17 +474,13 @@ function freshAcc() {
   };
 }
 
-/** Return null when no signal was found, otherwise the component bag. */
-function finalize(acc) {
-  const any = acc.input || acc.cacheRead || acc.cacheCreation5m ||
-    acc.cacheCreation1h || acc.cacheCreationFlat || acc.output;
-  if (!any) return null;
-  return acc;
+function isCount(v) {
+  if (typeof v !== 'number' && !(typeof v === 'string' && v.trim())) return false;
+  return Number.isFinite(Number(v)) && Number(v) >= 0;
 }
 
 function toInt(v) {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  return isCount(v) ? Math.round(Number(v)) : 0;
 }
 
 module.exports = {
