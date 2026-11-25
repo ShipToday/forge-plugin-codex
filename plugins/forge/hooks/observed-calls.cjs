@@ -6,7 +6,9 @@
  *
  * For each shell call: a hash of the command, its exit code, whether the
  * command is a known test runner, and when it ran. For each edit to a test
- * file: that it happened, and when. Never any text — no command, output or
+ * file: that it happened, and when. For each skill the session ran: a hash of
+ * the skill's bare name, and when, so a repo rule can show the skill calls
+ * Forge saw. Never any text — no command, skill name, output or
  * path leaves this machine; the test-runner and test-file checks run here.
  *
  * The tracker (PostToolUse) records; the guard (PreToolUse) stamps the log
@@ -26,6 +28,10 @@ const COMMAND_HASH_HEX = 24;
 // session confirms their result shape; until then their runs stay reported.
 const SHELL_TOOL_RE = /^(?:Bash|PowerShell|Shell)$/;
 const EDIT_TOOL_RE = /^(?:Edit|MultiEdit|Write|NotebookEdit)$/;
+const SKILL_TOOL = 'Skill';
+// Forge's own routing skill is not one the session's work called for; the
+// tracker leaves it out of the local-skill record for the same reason.
+const FORGE_ROUTER_SKILL = 'forge-autopilot';
 
 // Known test runners, matched on the command here so only a yes/no leaves.
 const TEST_RUNNERS = [
@@ -56,6 +62,20 @@ function commandHash(command) {
   const normalized = normalizeCommand(command);
   if (!normalized) return null;
   return createHash('sha256').update(normalized).digest('hex').slice(0, COMMAND_HASH_HEX);
+}
+
+/** A skill's bare name: "plugin:Code-Review" → "code-review". */
+function bareSkillName(name) {
+  return typeof name === 'string' ? normalizeCommand(name.split(':').pop()).toLowerCase() : '';
+}
+
+/**
+ * SHA-256 of the skill's bare, lowercased name — the server computes the
+ * same. Null for no name.
+ */
+function skillHash(name) {
+  const bare = bareSkillName(name);
+  return bare ? commandHash(bare) : null;
 }
 
 const ENV_ASSIGNMENTS = /^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/;
@@ -191,6 +211,13 @@ function observationFor(event, now = Date.now()) {
     if (EDIT_TOOL_RE.test(tool) && event.hook_event_name !== 'PostToolUseFailure' && editedPaths(event).some(isTestFile)) {
       return { id: entryId(event.session_id, now, 'edit'), ts: now, kind: 'edit', test_file: true };
     }
+    // A skill that failed to load did not run, so only a successful call counts.
+    if (tool === SKILL_TOOL && event.hook_event_name !== 'PostToolUseFailure') {
+      const name = parseInput(event.tool_input).skill;
+      if (bareSkillName(name) === FORGE_ROUTER_SKILL) return null;
+      const hash = skillHash(name);
+      return hash ? { id: entryId(event.session_id, now, hash), ts: now, kind: 'skill', hash } : null;
+    }
     return null;
   } catch {
     return null;
@@ -205,9 +232,9 @@ function observationFor(event, now = Date.now()) {
  * @param {object} entry - from observationFor
  * @returns {object}
  */
-/** A test run or a test-file edit: what the flags are drawn from. */
+/** A test run, a test-file edit or a skill call: kept ahead of ordinary commands. */
 function isEvidence(call) {
-  return Boolean(call) && ((call.kind === 'shell' && call.test_runner === true) || call.kind === 'edit');
+  return Boolean(call) && ((call.kind === 'shell' && call.test_runner === true) || call.kind === 'edit' || call.kind === 'skill');
 }
 
 /**
@@ -254,6 +281,7 @@ function observationsForUpdate(state) {
 module.exports = {
   MAX_OBSERVED_CALLS,
   commandHash,
+  skillHash,
   isTestRunner,
   isTestFile,
   observationFor,
